@@ -1,0 +1,778 @@
+{
+  "bf16": {
+    "value": true
+  },
+  "fp16": {
+    "value": false
+  },
+  "fsdp": {
+    "value": []
+  },
+  "seed": {
+    "value": 42
+  },
+  "tf32": {
+    "value": null
+  },
+  "debug": {
+    "value": []
+  },
+  "dtype": {
+    "value": "bfloat16"
+  },
+  "optim": {
+    "value": "adamw_8bit"
+  },
+  "_wandb": {
+    "value": {
+      "m": [
+        {
+          "1": "train/global_step",
+          "6": [
+            3
+          ],
+          "7": []
+        },
+        {
+          "2": "*",
+          "5": 1,
+          "6": [
+            1
+          ],
+          "7": []
+        }
+      ],
+      "t": {
+        "1": [
+          1,
+          5,
+          11,
+          35,
+          41,
+          49,
+          51,
+          53,
+          71,
+          83,
+          84,
+          98
+        ],
+        "2": [
+          1,
+          5,
+          11,
+          35,
+          41,
+          49,
+          51,
+          53,
+          71,
+          83,
+          84,
+          98
+        ],
+        "3": [
+          2,
+          7,
+          13,
+          15,
+          16,
+          19,
+          62,
+          66
+        ],
+        "4": "3.12.3",
+        "5": "0.26.0",
+        "6": "5.5.0",
+        "9": {
+          "1": "transformers_trainer"
+        },
+        "10": [
+          20
+        ],
+        "12": "0.26.0",
+        "13": "linux-x86_64"
+      },
+      "cli_version": "0.26.0",
+      "python_version": "3.12.3"
+    }
+  },
+  "lora_r": {
+    "value": 64
+  },
+  "do_eval": {
+    "value": false
+  },
+  "packing": {
+    "value": false
+  },
+  "project": {
+    "value": "huggingface"
+  },
+  "use_cpu": {
+    "value": false
+  },
+  "do_train": {
+    "value": false
+  },
+  "id2label": {
+    "value": {
+      "0": "LABEL_0",
+      "1": "LABEL_1"
+    }
+  },
+  "label2id": {
+    "value": {
+      "LABEL_0": 0,
+      "LABEL_1": 1
+    }
+  },
+  "run_name": {
+    "value": null
+  },
+  "data_seed": {
+    "value": 3407
+  },
+  "deepspeed": {
+    "value": null
+  },
+  "eos_token": {
+    "value": "<EOS_TOKEN>"
+  },
+  "hub_token": {
+    "value": "<HUB_TOKEN>"
+  },
+  "log_level": {
+    "value": "passive"
+  },
+  "max_steps": {
+    "value": 200
+  },
+  "pad_token": {
+    "value": "<PAD_TOKEN>"
+  },
+  "report_to": {
+    "value": [
+      "wandb"
+    ]
+  },
+  "use_cache": {
+    "value": false
+  },
+  "adam_beta1": {
+    "value": 0.9
+  },
+  "adam_beta2": {
+    "value": 0.999
+  },
+  "batch_size": {
+    "value": 1
+  },
+  "do_predict": {
+    "value": false
+  },
+  "eval_delay": {
+    "value": 0
+  },
+  "eval_steps": {
+    "value": null
+  },
+  "grad_accum": {
+    "value": 8
+  },
+  "local_rank": {
+    "value": -1
+  },
+  "lora_alpha": {
+    "value": 128
+  },
+  "max_length": {
+    "value": 1024
+  },
+  "model_name": {
+    "value": "unsloth/Qwen3.5-9B"
+  },
+  "model_type": {
+    "value": "qwen3_5"
+  },
+  "num_epochs": {
+    "value": 2
+  },
+  "optim_args": {
+    "value": null
+  },
+  "output_dir": {
+    "value": "/workspace/hp_search_outputs/trial_015"
+  },
+  "save_steps": {
+    "value": 500
+  },
+  "use_rslora": {
+    "value": true
+  },
+  "ddp_backend": {
+    "value": null
+  },
+  "ddp_timeout": {
+    "value": 1800
+  },
+  "fsdp_config": {
+    "value": {
+      "xla": false,
+      "xla_fsdp_v2": false,
+      "min_num_params": 0,
+      "xla_fsdp_grad_ckpt": false
+    }
+  },
+  "label_names": {
+    "value": null
+  },
+  "logging_dir": {
+    "value": null
+  },
+  "peft_config": {
+    "value": {
+      "default": {
+        "r": 64,
+        "bias": "none",
+        "revision": null,
+        "use_dora": false,
+        "lora_bias": false,
+        "peft_type": "LORA",
+        "task_type": "CAUSAL_LM",
+        "eva_config": null,
+        "lora_alpha": 128,
+        "use_bdlora": null,
+        "use_qalora": false,
+        "use_rslora": true,
+        "arrow_config": null,
+        "auto_mapping": {
+          "unsloth_fixed": true,
+          "parent_library": "transformers.models.qwen3_5.modeling_qwen3_5",
+          "base_model_class": "Qwen3_5ForConditionalGeneration"
+        },
+        "corda_config": null,
+        "lora_dropout": 0,
+        "peft_version": "0.19.0",
+        "megatron_core": "megatron.core",
+        "fan_in_fan_out": false,
+        "inference_mode": false,
+        "layers_pattern": null,
+        "lora_ga_config": null,
+        "runtime_config": {
+          "ephemeral_gpu_offload": false
+        },
+        "target_modules": "(?:.*?(?:language|text).*?(?:self_attn|attention|attn|mlp|feed_forward|ffn|dense).*?(?:qkv|proj|linear_fc1|linear_fc2|out_proj|in_proj_qkv|in_proj_z|in_proj_b|in_proj_a|gate_proj|up_proj|down_proj|q_proj|k_proj|v_proj|o_proj).*?)|(?:\\bmodel\\.layers\\.[\\d]{1,}\\.(?:self_attn|attention|attn|mlp|feed_forward|ffn|dense)\\.(?:(?:qkv|proj|linear_fc1|linear_fc2|out_proj|in_proj_qkv|in_proj_z|in_proj_b|in_proj_a|gate_proj|up_proj|down_proj|q_proj|k_proj|v_proj|o_proj)))",
+        "exclude_modules": null,
+        "megatron_config": null,
+        "modules_to_save": null,
+        "init_lora_weights": true,
+        "layer_replication": null,
+        "qalora_group_size": 16,
+        "target_parameters": null,
+        "ensure_weight_tying": false,
+        "layers_to_transform": null,
+        "alora_invocation_tokens": null,
+        "base_model_name_or_path": "unsloth/Qwen3.5-9B",
+        "trainable_token_indices": null
+      }
+    }
+  },
+  "push_to_hub": {
+    "value": false
+  },
+  "return_dict": {
+    "value": true
+  },
+  "text_config": {
+    "value": {
+      "dtype": "bfloat16",
+      "head_dim": 256,
+      "id2label": {
+        "0": "LABEL_0",
+        "1": "LABEL_1"
+      },
+      "label2id": {
+        "LABEL_0": 0,
+        "LABEL_1": 1
+      },
+      "use_cache": true,
+      "hidden_act": "silu",
+      "model_type": "qwen3_5_text",
+      "vocab_size": 248320,
+      "hidden_size": 4096,
+      "layer_types": [
+        "linear_attention",
+        "linear_attention",
+        "linear_attention",
+        "full_attention",
+        "linear_attention",
+        "linear_attention",
+        "linear_attention",
+        "full_attention",
+        "linear_attention",
+        "linear_attention",
+        "linear_attention",
+        "full_attention",
+        "linear_attention",
+        "linear_attention",
+        "linear_attention",
+        "full_attention",
+        "linear_attention",
+        "linear_attention",
+        "linear_attention",
+        "full_attention",
+        "linear_attention",
+        "linear_attention",
+        "linear_attention",
+        "full_attention",
+        "linear_attention",
+        "linear_attention",
+        "linear_attention",
+        "full_attention",
+        "linear_attention",
+        "linear_attention",
+        "linear_attention",
+        "full_attention"
+      ],
+      "return_dict": true,
+      "bos_token_id": null,
+      "eos_token_id": 248044,
+      "pad_token_id": null,
+      "problem_type": null,
+      "rms_norm_eps": 0.000001,
+      "_name_or_path": "",
+      "architectures": null,
+      "attention_bias": false,
+      "mamba_ssm_dtype": "float32",
+      "mlp_only_layers": [],
+      "rope_parameters": {
+        "rope_type": "default",
+        "rope_theta": 10000000,
+        "mrope_section": [
+          11,
+          11,
+          10
+        ],
+        "mrope_interleaved": true,
+        "partial_rotary_factor": 0.25
+      },
+      "attn_output_gate": true,
+      "attention_dropout": 0,
+      "initializer_range": 0.02,
+      "intermediate_size": 12288,
+      "num_hidden_layers": 32,
+      "output_attentions": false,
+      "is_encoder_decoder": false,
+      "linear_key_head_dim": 128,
+      "num_attention_heads": 16,
+      "num_key_value_heads": 4,
+      "tie_word_embeddings": false,
+      "linear_num_key_heads": 16,
+      "output_hidden_states": false,
+      "linear_value_head_dim": 128,
+      "mtp_num_hidden_layers": 1,
+      "partial_rotary_factor": 0.25,
+      "linear_conv_kernel_dim": 4,
+      "linear_num_value_heads": 32,
+      "chunk_size_feed_forward": 0,
+      "full_attention_interval": 4,
+      "max_position_embeddings": 262144,
+      "mtp_use_dedicated_embeddings": false
+    }
+  },
+  "adam_epsilon": {
+    "value": 1e-8
+  },
+  "disable_tqdm": {
+    "value": false
+  },
+  "eos_token_id": {
+    "value": 248046
+  },
+  "eval_packing": {
+    "value": null
+  },
+  "hub_model_id": {
+    "value": null
+  },
+  "hub_revision": {
+    "value": null
+  },
+  "hub_strategy": {
+    "value": "every_save"
+  },
+  "lr_scheduler": {
+    "value": "linear"
+  },
+  "pad_token_id": {
+    "value": 248055
+  },
+  "padding_free": {
+    "value": false
+  },
+  "problem_type": {
+    "value": null
+  },
+  "warmup_ratio": {
+    "value": null
+  },
+  "warmup_steps": {
+    "value": 0
+  },
+  "weight_decay": {
+    "value": 0.013802470048539942
+  },
+  "_name_or_path": {
+    "value": "unsloth/Qwen3.5-9B"
+  },
+  "architectures": {
+    "value": [
+      "Qwen3_5ForConditionalGeneration"
+    ]
+  },
+  "eval_on_start": {
+    "value": false
+  },
+  "eval_strategy": {
+    "value": "no"
+  },
+  "learning_rate": {
+    "value": 0.00011645105452323228
+  },
+  "logging_steps": {
+    "value": 20
+  },
+  "max_grad_norm": {
+    "value": 1
+  },
+  "save_strategy": {
+    "value": "no"
+  },
+  "torch_compile": {
+    "value": false
+  },
+  "unsloth_fixed": {
+    "value": true
+  },
+  "vision_config": {
+    "value": {
+      "depth": 27,
+      "dtype": "bfloat16",
+      "id2label": {
+        "0": "LABEL_0",
+        "1": "LABEL_1"
+      },
+      "label2id": {
+        "LABEL_0": 0,
+        "LABEL_1": 1
+      },
+      "num_heads": 16,
+      "hidden_act": "gelu_pytorch_tanh",
+      "model_type": "qwen3_5",
+      "patch_size": 16,
+      "hidden_size": 1152,
+      "in_channels": 3,
+      "return_dict": true,
+      "problem_type": null,
+      "_name_or_path": "",
+      "architectures": null,
+      "out_hidden_size": 4096,
+      "initializer_range": 0.02,
+      "intermediate_size": 4304,
+      "output_attentions": false,
+      "is_encoder_decoder": false,
+      "spatial_merge_size": 2,
+      "temporal_patch_size": 2,
+      "output_hidden_states": false,
+      "chunk_size_feed_forward": 0,
+      "num_position_embeddings": 2304,
+      "deepstack_visual_indexes": []
+    }
+  },
+  "bf16_full_eval": {
+    "value": true
+  },
+  "dataset_kwargs": {
+    "value": {
+      "skip_prepare_dataset": true
+    }
+  },
+  "fp16_full_eval": {
+    "value": false
+  },
+  "image_token_id": {
+    "value": 248056
+  },
+  "max_seq_length": {
+    "value": 1024
+  },
+  "video_token_id": {
+    "value": 248057
+  },
+  "crop_tight_prob": {
+    "value": 0.4560998466814129
+  },
+  "finetune_vision": {
+    "value": false
+  },
+  "hub_always_push": {
+    "value": false
+  },
+  "save_only_model": {
+    "value": false
+  },
+  "unsloth_version": {
+    "value": "2026.4.5"
+  },
+  "dataset_num_proc": {
+    "value": 64
+  },
+  "full_determinism": {
+    "value": false
+  },
+  "hub_private_repo": {
+    "value": null
+  },
+  "ignore_data_skip": {
+    "value": false
+  },
+  "log_on_each_node": {
+    "value": true
+  },
+  "logging_strategy": {
+    "value": "steps"
+  },
+  "lora_alpha_ratio": {
+    "value": 2
+  },
+  "num_train_epochs": {
+    "value": 1
+  },
+  "packing_strategy": {
+    "value": "bfd"
+  },
+  "save_total_limit": {
+    "value": null
+  },
+  "trackio_space_id": {
+    "value": "trackio"
+  },
+  "use_liger_kernel": {
+    "value": false
+  },
+  "ddp_bucket_cap_mb": {
+    "value": null
+  },
+  "greater_is_better": {
+    "value": null
+  },
+  "log_level_replica": {
+    "value": "warning"
+  },
+  "lr_scheduler_type": {
+    "value": "linear"
+  },
+  "model_init_kwargs": {
+    "value": null
+  },
+  "output_attentions": {
+    "value": false
+  },
+  "push_to_hub_token": {
+    "value": null
+  },
+  "save_on_each_node": {
+    "value": false
+  },
+  "accelerator_config": {
+    "value": {
+      "even_batches": true,
+      "non_blocking": false,
+      "split_batches": false,
+      "dispatch_batches": null,
+      "use_seedable_sampler": true,
+      "gradient_accumulation_kwargs": null
+    }
+  },
+  "batch_eval_metrics": {
+    "value": false
+  },
+  "chat_template_path": {
+    "value": null
+  },
+  "dataset_text_field": {
+    "value": ""
+  },
+  "is_encoder_decoder": {
+    "value": false
+  },
+  "length_column_name": {
+    "value": "length"
+  },
+  "logging_first_step": {
+    "value": false
+  },
+  "pad_to_multiple_of": {
+    "value": null
+  },
+  "parallelism_config": {
+    "value": null
+  },
+  "torch_compile_mode": {
+    "value": null
+  },
+  "unsloth_num_chunks": {
+    "value": -1
+  },
+  "assistant_only_loss": {
+    "value": false
+  },
+  "include_for_metrics": {
+    "value": []
+  },
+  "liger_kernel_config": {
+    "value": null
+  },
+  "lr_scheduler_kwargs": {
+    "value": null
+  },
+  "neftune_noise_alpha": {
+    "value": null
+  },
+  "skip_memory_metrics": {
+    "value": true
+  },
+  "tie_word_embeddings": {
+    "value": false
+  },
+  "vision_end_token_id": {
+    "value": 248054
+  },
+  "auto_find_batch_size": {
+    "value": false
+  },
+  "completion_only_loss": {
+    "value": null
+  },
+  "dataloader_drop_last": {
+    "value": false
+  },
+  "effective_batch_size": {
+    "value": 8
+  },
+  "model/num_parameters": {
+    "value": 9582927088
+  },
+  "optim_target_modules": {
+    "value": null
+  },
+  "output_hidden_states": {
+    "value": false
+  },
+  "prediction_loss_only": {
+    "value": false
+  },
+  "transformers_version": {
+    "value": "5.5.0"
+  },
+  "vllm_sampling_params": {
+    "value": null
+  },
+  "activation_offloading": {
+    "value": false
+  },
+  "dataloader_pin_memory": {
+    "value": true
+  },
+  "ddp_broadcast_buffers": {
+    "value": null
+  },
+  "enable_jit_checkpoint": {
+    "value": false
+  },
+  "metric_for_best_model": {
+    "value": null
+  },
+  "remove_unused_columns": {
+    "value": false
+  },
+  "torch_compile_backend": {
+    "value": null
+  },
+  "vision_start_token_id": {
+    "value": 248053
+  },
+  "dataloader_num_workers": {
+    "value": 0
+  },
+  "eval_do_concat_batches": {
+    "value": true
+  },
+  "eval_use_gather_object": {
+    "value": false
+  },
+  "gradient_checkpointing": {
+    "value": true
+  },
+  "label_smoothing_factor": {
+    "value": 0
+  },
+  "load_best_model_at_end": {
+    "value": false
+  },
+  "logging_nan_inf_filter": {
+    "value": false
+  },
+  "resume_from_checkpoint": {
+    "value": null
+  },
+  "chunk_size_feed_forward": {
+    "value": 0
+  },
+  "eval_accumulation_steps": {
+    "value": 2
+  },
+  "torch_empty_cache_steps": {
+    "value": 250
+  },
+  "train_sampling_strategy": {
+    "value": "random"
+  },
+  "unsloth_grpo_mini_batch": {
+    "value": null
+  },
+  "dataloader_prefetch_factor": {
+    "value": null
+  },
+  "ddp_find_unused_parameters": {
+    "value": null
+  },
+  "per_device_eval_batch_size": {
+    "value": 4
+  },
+  "gradient_accumulation_steps": {
+    "value": 8
+  },
+  "per_device_train_batch_size": {
+    "value": 1
+  },
+  "average_tokens_across_devices": {
+    "value": true
+  },
+  "dataloader_persistent_workers": {
+    "value": false
+  },
+  "gradient_checkpointing_kwargs": {
+    "value": null
+  },
+  "include_num_input_tokens_seen": {
+    "value": "no"
+  },
+  "unsloth_logit_chunk_multiplier": {
+    "value": null
+  },
+  "restore_callback_states_from_checkpoint": {
+    "value": false
+  }
+}

@@ -1,0 +1,60 @@
+{
+  "paths": {
+    "data_dir": "/workspace/data",
+    "volume_dir": "/workspace",
+    "output_dir": "/workspace/hp_search_outputs",
+    "best_model_dir": "/workspace/best-pest-detector",
+    "db_path": "/workspace/hp_search_results.db",
+    "log_file": "/workspace/hp_search.log",
+    "preload_cache_dir": "/workspace/preload_cache",
+    "final_output_dir": "/workspace/best-pest-detector",
+    "golden_dir": "/workspace/_golden"
+  },
+  "runtime": {
+    "study_name": "pest-detection-hpsearch",
+    "base_model": "unsloth/Qwen3.5-9B",
+    "default_n_trials": 30,
+    "wandb_project": "pest-detection-hpsearch",
+    "wandb_entity": ""
+  },
+  "notifications": {
+    // 반드시 배열 사용
+    "discord_webhooks": [
+      "https://discord.com/api/webhooks/REPLACE_ME"
+    ]
+  },
+  "github": {
+    "repo": "owner/repo"
+  },
+  "auth": {
+    "hf_token": "",
+    "wandb_api_key": "",
+    "github_token": ""
+  },
+  "huggingface": {
+    "dataset_repo": "Himedia-AI-01/pest-detection-korean",
+    "hf_repo_id": "owner/model-repo"
+  },
+  "hyperparameters": {
+    "lora_r": 64,
+    "lora_alpha": 128,
+    "use_rslora": true,
+    "lora_dropout": 0.0,
+    "finetune_vision": false,
+    "learning_rate": 0.0001,
+    "weight_decay": 0.01,
+    "lr_scheduler_type": "linear",
+    "warmup_ratio": 0.03,
+    "max_grad_norm": 1.0,
+    "adam_beta1": 0.9,
+    "adam_beta2": 0.999,
+    "adam_epsilon": 1e-8,
+    "optim": "adamw_torch",
+    "per_device_train_batch_size": 1,
+    "gradient_accumulation_steps": 8,
+    "max_seq_length": 1024,
+    "crop_tight_prob": 0.45,
+    "seed": 42,
+    "data_seed": 3407
+  }
+}
