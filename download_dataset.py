@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 MAX_RETRIES = 5
 INITIAL_BACKOFF = 30
-REQUIRED_FILES = ["train.jsonl", "val.jsonl"]
+REQUIRED_FILES = ["train.jsonl", "validation.jsonl"]
 
 
 def call_with_kwargs(func: Callable[..., Any], kwargs: dict[str, Any]) -> Any:
