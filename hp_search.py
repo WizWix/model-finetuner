@@ -25,6 +25,7 @@ Optuna + Unsloth + SFTTrainer + W&B + Discord 알림
 """
 
 import argparse
+import inspect
 import json
 import logging
 import math
@@ -201,6 +202,21 @@ OBJECTIVE_METRIC = "eval_loss"
 
 # 볼륨이 없을 때 import 단계에서 크래시하지 않도록 로거는 main()에서 설정
 logger = logging.getLogger(__name__)
+
+
+def apply_sft_seq_len_kwarg(
+    sft_config_kwargs: dict[str, Any], sft_config_cls: type, seq_len: int
+) -> None:
+    """trl 버전에 따라 SFTConfig 길이 인자명을 맞춘다."""
+    sft_init_params = inspect.signature(sft_config_cls.__init__).parameters
+    if "max_seq_length" in sft_init_params:
+        sft_config_kwargs["max_seq_length"] = seq_len
+    elif "max_length" in sft_init_params:
+        sft_config_kwargs["max_length"] = seq_len
+    else:
+        logger.warning(
+            "SFTConfig에서 max length 인자(max_seq_length/max_length)를 찾지 못했습니다."
+        )
 
 
 class TrialExecutionError(Exception):
@@ -1052,8 +1068,8 @@ def objective(trial: optuna.Trial, args) -> float:
             "remove_unused_columns": False,
             "dataset_text_field": "",
             "dataset_kwargs": {"skip_prepare_dataset": True},
-            "max_seq_length": max_seq,
         }
+        apply_sft_seq_len_kwarg(sft_config_kwargs, SFTConfig, max_seq)
         trainer_kwargs: dict[str, Any] = {
             "model": model,
             "tokenizer": tokenizer,
@@ -1471,10 +1487,12 @@ def retrain_best(study: optuna.Study):
             "remove_unused_columns": False,
             "dataset_text_field": "",
             "dataset_kwargs": {"skip_prepare_dataset": True},
-            "max_seq_length": p["max_seq_length"],
             "load_best_model_at_end": True,
             "metric_for_best_model": "eval_loss",
         }
+        apply_sft_seq_len_kwarg(
+            retrain_sft_config_kwargs, SFTConfig, p["max_seq_length"]
+        )
         retrain_trainer_kwargs: dict[str, Any] = {
             "model": model,
             "tokenizer": tokenizer,

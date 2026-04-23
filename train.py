@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import logging
 import os
@@ -310,8 +311,16 @@ def main() -> int:
         "remove_unused_columns": False,
         "dataset_text_field": "",
         "dataset_kwargs": {"skip_prepare_dataset": True},
-        "max_seq_length": hp["max_seq_length"],
     }
+    sft_init_params = inspect.signature(SFTConfig.__init__).parameters
+    if "max_seq_length" in sft_init_params:
+        sft_config_kwargs["max_seq_length"] = hp["max_seq_length"]
+    elif "max_length" in sft_init_params:
+        sft_config_kwargs["max_length"] = hp["max_seq_length"]
+    else:
+        logger.warning(
+            "SFTConfig에서 max length 인자(max_seq_length/max_length)를 찾지 못했습니다."
+        )
     sft_args = SFTConfig(**sft_config_kwargs)
 
     trainer_kwargs: dict[str, Any] = {
