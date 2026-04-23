@@ -1,7 +1,7 @@
 [project]
-name = "kor-pest-detection-training"
+name = "model-finetuner"
 version = "0.1.0"
-description = "Training pipeline for Korean pest detection VLM fine-tuning and HP search"
+description = "Training pipeline for AI Model fine-tuning and HP search"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [

@@ -228,15 +228,15 @@ def discord_send(
 def discord_search_started(n_trials, mode):
     discord_send(
         embed={
-            "title": "🔍 하이퍼파라미터 검색 시작",
-            "color": 0x3498DB,
-            "fields": [
-                {"name": "모드", "value": mode, "inline": True},
-                {"name": "트라이얼 수", "value": str(n_trials), "inline": True},
-                {"name": "모델", "value": BASE_MODEL, "inline": True},
-                {"name": "목적 함수", "value": OBJECTIVE_METRIC, "inline": True},
-            ],
-            "footer": {"text": f"시작: {_kst_now()} KST"},
+            "embeds": [
+                {
+                    "author": {"name": "AI 모델 하이퍼-파라미터 탐색"},
+                    "color": 3447003,
+                    "title": "🔍 하이퍼-파라미터 검색 시작",
+                    "description": f"- 모드: {mode}\n- 트라이얼 수: {str(n_trials)}\n- 모델: {BASE_MODEL}\n- 목적 함수: {OBJECTIVE_METRIC}",
+                    "footer": {"text": f"시작: {_kst_now()} KST"},
+                }
+            ]
         }
     )
 

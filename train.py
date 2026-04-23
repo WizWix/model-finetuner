@@ -160,9 +160,6 @@ def main() -> int:
 
     webhooks = get_discord_webhooks(cfg)
 
-    def notify(content: str) -> None:
-        send_discord(webhooks, content=content, timeout=10)
-
     random.seed(hp["seed"])
     torch.manual_seed(hp["seed"])
     if torch.cuda.is_available():
@@ -183,6 +180,18 @@ def main() -> int:
     os.makedirs(output_dir, exist_ok=True)
 
     logger.info("데이터셋 로딩 중...")
+    send_discord(
+        webhooks,
+        embed={
+            "embeds": [
+                {
+                    "author": {"name": "AI 모델 파인튜너"},
+                    "color": 3066993,
+                    "title": "데이터셋 로딩 중...",
+                }
+            ]
+        },
+    )
     n_train_total = get_line_count(os.path.join(data_dir, "train.jsonl"))
     train_frac = get_max_data_fraction(n_train_total)
     train_dataset = load_dataset_from_jsonl(
@@ -207,11 +216,18 @@ def main() -> int:
     )
     n_val = len(val_dataset)
     eval_samples = n_val if args.eval_samples < 0 else min(args.eval_samples, n_val)
-    notify(
-        f"📦 **데이터셋 로딩 완료**\n"
-        f"• 학습 샘플: {len(train_dataset)}\n"
-        f"• 검증 샘플: {n_val}\n"
-        f"• 평가 샘플 수: {eval_samples}"
+    send_discord(
+        webhooks,
+        embed={
+            "embeds": [
+                {
+                    "author": {"name": "AI 모델 파인튜너"},
+                    "color": 3066993,
+                    "title": "📦 데이터셋 로딩 완료",
+                    "description": f"- 학습 샘플: {len(train_dataset)}\n- 검증 샘플: {n_val}\n- 평가 샘플: {eval_samples}",
+                }
+            ]
+        },
     )
 
     clear_gpu_memory(logger=logger)
@@ -307,29 +323,62 @@ def main() -> int:
         "args": sft_args,
     }
     trainer = SFTTrainer(**trainer_kwargs)
-    notify(
-        f"🧱 **모델/트레이너 준비 완료**\n"
-        f"• 모델: {base_model}\n"
-        f"• 출력 경로: `{output_dir}`\n"
-        f"• save/eval/logging steps: {args.save_steps}/{eval_steps}/{args.logging_steps}"
+    send_discord(
+        webhooks,
+        embed={
+            "embeds": [
+                {
+                    "author": {"name": "AI 모델 파인튜너"},
+                    "color": 3066993,
+                    "title": "🧱 모델/트레이너 준비 완료",
+                    "description": f"- 모델: {base_model}\n- 출력 경로: {output_dir}\n- save/eval/logging steps: {args.save_steps}/{eval_steps}/{args.logging_steps}",
+                }
+            ]
+        },
     )
 
-    notify(
-        f"🚀 **고정 HP 파인튜닝 시작**\n"
-        f"• 에폭: {args.epochs}\n"
-        f"• LR: {hp['learning_rate']:.2e}\n"
-        f"• LoRA r={hp['lora_r']}, α={hp['lora_alpha']}\n"
-        f"• 학습 샘플: {len(train_dataset)}\n"
-        f"• 검증 샘플: {n_val}\n"
-        f"• 평가 샘플 수: {eval_samples}\n"
-        f"• save/eval/logging steps: {args.save_steps}/{eval_steps}/{args.logging_steps}"
+    send_discord(
+        webhooks,
+        embed={
+            "embeds": [
+                {
+                    "author": {"name": "AI 모델 파인튜너"},
+                    "color": 3066993,
+                    "title": "🚀 고정 HP 파인튜닝 시작",
+                    "description": f"- 에폭: {args.epochs}\n- LR: {hp['learning_rate']:.2e}\n- LoRA r={hp['lora_r']}, alpha={hp['lora_alpha']}\n- 학습 샘플: {len(train_dataset)}\n- 검증 샘플: {n_val}\n- 평가 샘플 수: {eval_samples}\n- save/eval/logging steps: {args.save_steps}/{eval_steps}/{args.logging_steps}",
+                }
+            ]
+        },
     )
 
     t0 = time.time()
-    notify("🏋️ **학습 루프 시작**")
+    send_discord(
+        webhooks,
+        embed={
+            "embeds": [
+                {
+                    "author": {"name": "AI 모델 파인튜너"},
+                    "color": 3066993,
+                    "title": "🏋️ 학습 루프 시작",
+                }
+            ]
+        },
+    )
     trainer.train()
     elapsed_min = (time.time() - t0) / 60
-    notify(f"✅ **학습 루프 완료**\n• 소요 시간: {elapsed_min:.1f}분")
+    send_discord(
+        webhooks,
+        embed={
+            "embeds": [
+                {
+                    "author": {"name": "AI 모델 파인튜너"},
+                    "title": "✅ 학습 루프 완료",
+                    "color": 3066993,
+                    "description": f"- 소요 시간: {elapsed_min:.1f}분",
+                }
+            ]
+        },
+    )
 
     lora_dir = os.path.join(output_dir, "lora")
     model.save_pretrained(lora_dir)
@@ -348,16 +397,35 @@ def main() -> int:
             trial_num="predefined-finetune",
             logger=logger,
         )
-        notify(
-            f"🧪 **평가 완료**\n"
-            f"• Accuracy: {eval_result.get('accuracy', 0.0):.4f}\n"
-            f"• F1(macro): {eval_result.get('f1_macro', 0.0):.4f}\n"
-            f"• F1(weighted): {eval_result.get('f1_weighted', 0.0):.4f}"
+        send_discord(
+            webhooks,
+            embed={
+                "embeds": [
+                    {
+                        "author": {"name": "AI 모델 파인튜너"},
+                        "color": 3066993,
+                        "title": "🧪 평가 완료",
+                        "description": f"- Accuracy: {eval_result.get('accuracy', 0.0):.4f}\n- Precision macro: {eval_result.get('precision_macro', 0.0):.4f}\n- Recall macro: {eval_result.get('recall_macro', 0.0):.4f}\n- F1 (macro): {eval_result.get('f1_macro', 0.0):.4f}\n- F1 (weighted): {eval_result.get('f1_weighted', 0.0):.4f}",
+                    }
+                ]
+            },
         )
         with open(os.path.join(eval_dir, "metrics.json"), "w", encoding="utf-8") as f:
             json.dump(eval_result, f, indent=2, ensure_ascii=False, default=str)
     else:
-        notify("🧪 **평가 스킵됨** (`--no-eval`)")
+        send_discord(
+            webhooks,
+            embed={
+                "embeds": [
+                    {
+                        "author": {"name": "AI 모델 파인튜너"},
+                        "color": 15844367,
+                        "title": "🧪 평가 스킵됨",
+                        "description": "`--no-eval` 사용됨",
+                    }
+                ]
+            },
+        )
 
     readme_path = os.path.join(output_dir, "README.md")
     with open(readme_path, "w", encoding="utf-8") as f:
@@ -385,21 +453,51 @@ def main() -> int:
                 repo_id=hf_repo,
                 token=hf_token,
             )
-            notify(f"📤 **Hugging Face 업로드 완료**\n• Repo: `{hf_repo}`")
+            send_discord(
+                webhooks,
+                embed={
+                    "embeds": [
+                        {
+                            "author": {"name": "AI 모델 파인튜너"},
+                            "color": 3066993,
+                            "title": "📤 HuggingFace 업로드 완료",
+                            "description": f"- Repo: [`{hf_repo}`](https://huggingface.co/{hf_repo})",
+                        }
+                    ]
+                },
+            )
         except Exception as exc:
             logger.exception("HF 업로드 실패: %s", exc)
-            notify(
-                f"⚠️ **Hugging Face 업로드 실패**\n• Repo: `{hf_repo}`\n• 오류: `{exc}`"
+            send_discord(
+                webhooks,
+                embed={
+                    "embeds": [
+                        {
+                            "author": {"name": "AI 모델 파인튜너"},
+                            "color": 15277667,
+                            "title": "⚠️ HuggingFace 업로드 실패",
+                            "description": f"- Repo: [`{hf_repo}`](https://huggingface.co/{hf_repo})\n- 오류: {exc}",
+                        }
+                    ]
+                },
             )
 
     if wandb_run:
         wandb_run.finish()
 
     logger.info("완료: %s", lora_dir)
-    notify(
-        f"🎉 **고정 HP 파인튜닝 전체 완료**\n"
-        f"• LoRA 출력: `{lora_dir}`\n"
-        f"• 소요 시간: {elapsed_min:.1f}분"
+    send_discord(
+        webhooks,
+        embed={
+            "embeds": [
+                {
+                    "author": {"name": "AI 모델 파인튜너"},
+                    "color": 3066993,
+                    "title": "🎉 고정 하이퍼-파라미터 파인튜닝 전체 완료",
+                    "description": f"- LoRA 출력: `{lora_dir}`\n- 소요 시간: {elapsed_min:.1f}분",
+                }
+            ]
+        },
     )
     return 0
 
