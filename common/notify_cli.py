@@ -47,7 +47,7 @@ def main() -> int:
     if payload is not None:
         if not isinstance(payload, dict):
             raise ValueError("페이로드 JSON은 JSON 객체여야 합니다.")
-        send_discord(webhooks=webhooks, payload=payload)
+        send_discord(webhooks=webhooks, payload=payload, wait=True)
         return 0
 
     host = socket.gethostname()
@@ -57,7 +57,7 @@ def main() -> int:
         f"exit_code: `{args.exit_code}`\\n"
         f"{args.message}"
     )
-    send_discord(webhooks=webhooks, content=content)
+    send_discord(webhooks=webhooks, content=content, wait=True)
     return 0
 
 

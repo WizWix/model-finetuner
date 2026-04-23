@@ -22,6 +22,7 @@ def send_discord(
     embed: dict[str, Any] | None = None,
     payload: dict[str, Any] | None = None,
     timeout: int = 10,
+    wait: bool = False,
 ) -> None:
     if not webhooks:
         return
@@ -57,5 +58,12 @@ def send_discord(
         except Exception as exc:
             logger.warning("Discord 알림 실패 (webhook=%s): %s", safe_url, exc)
 
+    threads: list[threading.Thread] = []
     for webhook in webhooks:
-        threading.Thread(target=_send_one, args=(webhook,), daemon=True).start()
+        t = threading.Thread(target=_send_one, args=(webhook,), daemon=not wait)
+        t.start()
+        threads.append(t)
+
+    if wait:
+        for t in threads:
+            t.join(timeout=timeout + 1)
