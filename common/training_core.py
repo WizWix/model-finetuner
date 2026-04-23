@@ -47,6 +47,18 @@ def get_line_count(path: str) -> int:
     return _line_count_cache[path]
 
 
+def resolve_split_name(data_dir: str, split: str) -> str:
+    primary = os.path.join(data_dir, f"{split}.jsonl")
+    if os.path.exists(primary):
+        return split
+
+    aliases = {"val": "validation", "validation": "val"}
+    alt = aliases.get(split)
+    if alt and os.path.exists(os.path.join(data_dir, f"{alt}.jsonl")):
+        return alt
+    return split
+
+
 def get_max_data_fraction(n_train_samples: int) -> float:
     try:
         total_bytes: int | None = None
@@ -157,7 +169,10 @@ def _preload_samples(
     logger: logging.Logger | None,
 ) -> list[dict[str, Any]]:
     log = _get_logger(logger)
-    cache_key = (data_dir, split, round(fraction, 4), max_image_dim)
+    resolved_split = resolve_split_name(data_dir, split)
+    if resolved_split != split:
+        log.info("split 매핑 적용: %s -> %s", split, resolved_split)
+    cache_key = (data_dir, resolved_split, round(fraction, 4), max_image_dim)
     if cache_key in _preloaded_samples:
         return _preloaded_samples[cache_key]
 
@@ -166,7 +181,7 @@ def _preload_samples(
         os.makedirs(preload_cache_dir, exist_ok=True)
         cache_file = os.path.join(
             preload_cache_dir,
-            f"{split}_f{round(fraction, 4)}_d{max_image_dim}.pkl",
+            f"{resolved_split}_f{round(fraction, 4)}_d{max_image_dim}.pkl",
         )
         if os.path.exists(cache_file):
             try:
@@ -178,7 +193,7 @@ def _preload_samples(
             except Exception as exc:
                 log.warning("캐시 로드 실패 (%s): %s", cache_file, exc)
 
-    jsonl_path = os.path.join(data_dir, f"{split}.jsonl")
+    jsonl_path = os.path.join(data_dir, f"{resolved_split}.jsonl")
     total_lines = get_line_count(jsonl_path)
     rng = random.Random(random_seed)
     keep = (
@@ -223,7 +238,9 @@ def _preload_samples(
 
             tight_img = None
             if label != "정상":
-                bbox = find_label_json(data_dir, split, class_name, img_filename)
+                bbox = find_label_json(
+                    data_dir, resolved_split, class_name, img_filename
+                )
                 if bbox:
                     orig = Image.open(img_path).convert("RGB")
                     tight_img = cap_image_size(
@@ -280,7 +297,10 @@ class LazyImageDataset:
         )
 
     def _collect_metadata(self, split: str, fraction: float) -> list[dict[str, Any]]:
-        jsonl_path = os.path.join(self.data_dir, f"{split}.jsonl")
+        resolved_split = resolve_split_name(self.data_dir, split)
+        if resolved_split != split:
+            self.logger.info("split 매핑 적용: %s -> %s", split, resolved_split)
+        jsonl_path = os.path.join(self.data_dir, f"{resolved_split}.jsonl")
         total_lines = get_line_count(jsonl_path)
         rng = random.Random(self.random_seed)
         keep = (
@@ -317,7 +337,7 @@ class LazyImageDataset:
                 bbox = None
                 if label != "정상":
                     bbox = find_label_json(
-                        self.data_dir, split, class_name, img_filename
+                        self.data_dir, resolved_split, class_name, img_filename
                     )
                 out.append({"label": label, "img_path": img_path, "bbox": bbox})
         return out

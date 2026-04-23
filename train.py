@@ -207,7 +207,7 @@ def main() -> int:
     )
     val_dataset = load_dataset_from_jsonl(
         data_dir=data_dir,
-        split="val",
+        split="validation",
         random_seed=hp["seed"],
         preload_cache_dir=preload_cache_dir,
         max_image_dim=768,

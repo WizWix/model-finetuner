@@ -914,7 +914,7 @@ def objective(trial: optuna.Trial, args) -> float:
         # val은 고정 시드 사용: 모든 트라이얼이 동일한 프롬프트/순서를 보도록 유지
         random.seed(RANDOM_SEED)
         val_dataset = load_dataset_from_jsonl(
-            "val",
+            "validation",
             tight_prob=0.5,
             fraction=1.0,
         )
@@ -1411,7 +1411,7 @@ def retrain_best(study: optuna.Study):
             tight_prob=p["crop_tight_prob"],
             fraction=retrain_frac,
         )
-        val_dataset = load_dataset_from_jsonl("val")
+        val_dataset = load_dataset_from_jsonl("validation")
 
         clear_gpu_memory()
 

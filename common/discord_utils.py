@@ -33,7 +33,11 @@ def send_discord(
         if content:
             outgoing_payload["content"] = content
         if embed:
-            outgoing_payload["embeds"] = [embed]
+            embeds = embed.get("embeds")
+            if isinstance(embeds, list):
+                outgoing_payload["embeds"] = embeds
+            else:
+                outgoing_payload["embeds"] = [embed]
 
     if not outgoing_payload:
         return
