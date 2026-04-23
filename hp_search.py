@@ -25,44 +25,61 @@ Optuna + Unsloth + SFTTrainer + W&B + Discord 알림
 """
 
 import argparse
-import gc
 import json
 import logging
-import os
-import pickle
-import random
 import math
+import os
+import random
 import shutil
 import signal
 import threading
 import time
 import traceback
-from datetime import datetime, timezone, timedelta
-from collections.abc import Iterable
-from typing import Any, cast
+from datetime import datetime, timedelta, timezone
+from typing import Any
 
 import optuna
+import torch
 from optuna.pruners import HyperbandPruner
 from optuna.samplers import TPESampler
 
-import torch
-from PIL import Image
 from common.app_config import (
     apply_auth_environment,
     get_discord_webhooks,
     load_app_config,
 )
 from common.discord_utils import send_discord
+from common.training_core import (
+    PROMPTS,
+    SYSTEM_MSG,
+)
+from common.training_core import (
+    clear_gpu_memory as core_clear_gpu_memory,
+)
+from common.training_core import (
+    evaluate_model as core_evaluate_model,
+)
+from common.training_core import (
+    get_line_count as core_get_line_count,
+)
+from common.training_core import (
+    get_max_data_fraction as core_get_max_data_fraction,
+)
+from common.training_core import (
+    load_dataset_from_jsonl as core_load_dataset_from_jsonl,
+)
+from common.training_core import (
+    load_model_with_retry as core_load_model_with_retry,
+)
+from common.wandb_utils import wandb_is_available as core_wandb_is_available
 
 # Ampere GPU에서 TF32를 사용해 남은 FP32 연산(옵티마이저, 손실 계산)을 가속
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 torch.set_float32_matmul_precision("high")
 
-# 대형 해충 이미지에서 DecompressionBombWarning을 억제하고
-# 최대 이미지 크기를 제한해 OOM을 방지
-Image.MAX_IMAGE_PIXELS = None
-MAX_IMAGE_DIM = 768  # 이 값보다 큰 이미지는 리사이즈(모델 입력은 512px)
+# 최대 이미지 크기 제한(공통 데이터 로더에 전달)
+MAX_IMAGE_DIM = 768
 
 # ═══════════════════════════════════════════════════════════════════════
 # 1. 설정
@@ -114,12 +131,6 @@ PROXY_STEPS_FLOOR = 50  # 너무 낮아지지 않도록 하한
 PROXY_STEPS_CEILING = 200  # 너무 길어지지 않도록 상한
 PROXY_VAL_CAP = 150  # 트레이너 손실 평가용 검증셋 상한(전체는 수천 개)
 
-# RAM 기준 데이터 비율 상한
-# 1024x1024 RGB 이미지는 메모리에서 약 3MB.
-# 모델 로딩(임시 CPU 복사), 검증셋, 파이썬/OS 오버헤드를 위해 약 15GB 예약.
-_RAM_RESERVE_GB = 15.0
-_BYTES_PER_IMAGE = 3.0 * 1024**2  # 이미지 1장당 약 3MB
-
 
 def initialize_from_config(config_path: str) -> dict:
     """config.json을 로드하고 런타임 전역 설정값에 반영한다."""
@@ -160,34 +171,7 @@ def initialize_from_config(config_path: str) -> dict:
 
 
 def get_max_data_fraction(n_train_samples: int) -> float:
-    """사용 가능한 RAM에 맞는 최대 데이터 비율을 계산한다."""
-    try:
-        total_bytes: int | None = None
-
-        # POSIX 환경: sysconf가 존재하면 우선 사용
-        sysconf = getattr(os, "sysconf", None)
-        if callable(sysconf):
-            page_size = int(sysconf("SC_PAGE_SIZE"))  # pyright: ignore[reportArgumentType]
-            phys_pages = int(sysconf("SC_PHYS_PAGES"))  # pyright: ignore[reportArgumentType]
-            total_bytes = page_size * phys_pages
-
-        # Windows/기타 환경 fallback
-        if total_bytes is None:
-            import psutil
-
-            total_bytes = int(psutil.virtual_memory().total)
-
-        total_ram_gb = total_bytes / 1024**3
-    except (ImportError, AttributeError, ValueError, OSError):
-        return 1.0  # 감지 실패 시 제한 없음으로 간주
-
-    usable_gb = total_ram_gb - _RAM_RESERVE_GB
-    if usable_gb <= 0:
-        return 0.1
-
-    max_images = int(usable_gb * 1024**3 / _BYTES_PER_IMAGE)
-    max_frac = min(1.0, max_images / max(1, n_train_samples))
-    return max_frac
+    return core_get_max_data_fraction(n_train_samples)
 
 
 SEARCH_SPACE = {
@@ -208,44 +192,19 @@ SEARCH_SPACE = {
     "crop_tight_prob": (0.4, 0.65),
 }
 
-_line_count_cache = {}
-
-# 트라이얼 간 이미지 디코딩 캐시. 키는 (split, fraction)
-# 580샘플 기준 디코딩+LANCZOS 리사이즈에 트라이얼당 약 7분이 걸려
-# 기존에는 매번 반복됐고, 캐시로 (split, fraction) 조합당 1회로 상쇄
-# 각 항목: {"label": str, "full": PIL, "tight": PIL|None}
-# tight crop은 bbox 기반으로 미리 계산해두어, 트라이얼마다 파일 재오픈 없이
-# full/tight만 확률적으로 선택하면 되도록 구성
-_PRELOADED_SAMPLES: dict = {}
-
 
 def _get_line_count(path: str) -> int:
-    """파일 줄 수를 계산하고 트라이얼 간 캐시한다."""
-    if path not in _line_count_cache:
-        with open(path, "r") as f:
-            _line_count_cache[path] = sum(1 for _ in f)
-    return _line_count_cache[path]
+    return core_get_line_count(path)
 
-
-SYSTEM_MSG = (
-    "당신은 작물 해충 식별 전문가입니다. "
-    "사진을 보고 해충의 이름만 한국어로 답하세요. "
-    '해충이 없으면 "정상"이라고만 답하세요. '
-    "부가 설명 없이 이름만 출력하세요."
-)
-
-PROMPTS = [
-    "이 사진에 있는 해충의 이름을 알려주세요.",
-    "이 벌레는 무엇인가요?",
-    "사진 속 해충을 식별해주세요.",
-    "이 작물에 있는 해충의 종류가 무엇인가요?",
-    "이 사진에서 어떤 해충이 보이나요?",
-]
 
 OBJECTIVE_METRIC = "eval_loss"
 
 # 볼륨이 없을 때 import 단계에서 크래시하지 않도록 로거는 main()에서 설정
 logger = logging.getLogger(__name__)
+
+
+class TrialExecutionError(Exception):
+    """트라이얼 내부 실행 실패를 Optuna FAIL 상태로 남기기 위한 예외."""
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -469,7 +428,7 @@ def _install_fatal_signal_handlers():
 
 
 def wandb_is_available():
-    return bool(os.environ.get("WANDB_API_KEY"))
+    return core_wandb_is_available(logger=logger)
 
 
 def wandb_init_trial(trial_num, params):
@@ -543,6 +502,7 @@ def github_upload_db(reason: str = ""):
 
     def _upload():
         import base64
+
         import requests as _req
 
         try:
@@ -599,9 +559,10 @@ def github_create_release(tag: str, name: str, body: str, files: dict):
     if not GITHUB_TOKEN or not GITHUB_REPO:
         logger.warning("GitHub 토큰 또는 레포가 설정되지 않아 릴리스를 건너뜁니다.")
         return None
-    import requests as _req
     import tarfile
     import tempfile
+
+    import requests as _req
 
     headers = {
         "Authorization": f"token {GITHUB_TOKEN}",
@@ -734,306 +695,20 @@ def github_upload_results(eval_result=None):
 # ═══════════════════════════════════════════════════════════════════════
 
 
-def crop_to_bbox(img, bbox, padding_ratio=0.0):
-    xtl, ytl = bbox["xtl"], bbox["ytl"]
-    xbr, ybr = bbox["xbr"], bbox["ybr"]
-    bw, bh = xbr - xtl, ybr - ytl
-    pad_x, pad_y = int(bw * padding_ratio), int(bh * padding_ratio)
-    x1 = max(0, xtl - pad_x)
-    y1 = max(0, ytl - pad_y)
-    x2 = min(img.width, xbr + pad_x)
-    y2 = min(img.height, ybr + pad_y)
-    # 잘못된 bbox로 0크기 crop이 생기는 경우 방지
-    if x2 <= x1 or y2 <= y1:
-        return img
-    return img.crop((x1, y1, x2, y2))
-
-
-def cap_image_size(img):
-    """가로/세로 중 하나라도 MAX_IMAGE_DIM을 넘으면 리사이즈한다.
-    종횡비를 유지하며, RAM 해제를 위해 원본 이미지를 닫는다."""
-    w, h = img.size
-    if max(w, h) <= MAX_IMAGE_DIM:
-        return img
-    scale = MAX_IMAGE_DIM / max(w, h)
-    new_w, new_h = max(1, int(w * scale)), max(1, int(h * scale))
-    lanczos = getattr(getattr(Image, "Resampling", Image), "LANCZOS")
-    resized = img.resize((new_w, new_h), lanczos)
-    img.close()  # 원본 대형 이미지 메모리 해제
-    return resized
-
-
-def find_label_json(split, class_name, img_filename):
-    json_path = os.path.join(DATA_DIR, split, class_name, img_filename + ".json")
-    if not os.path.exists(json_path):
-        return None
-    try:
-        with open(json_path, encoding="utf-8") as f:
-            data = json.load(f)
-    except (json.JSONDecodeError, ValueError):
-        return None  # 비어있거나 손상된 라벨 파일이면 bbox 생략
-    for obj in data.get("annotations", {}).get("object", []):
-        if obj["grow"] == 33 and obj.get("points"):
-            return obj["points"][0]
-    return None
-
-
-def make_conversation(image, label):
-    return {
-        "messages": [
-            {"role": "system", "content": [{"type": "text", "text": SYSTEM_MSG}]},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image", "image": image},
-                    {"type": "text", "text": random.choice(PROMPTS)},
-                ],
-            },
-            {"role": "assistant", "content": [{"type": "text", "text": label}]},
-        ]
-    }
-
-
-def _preload_samples(split: str, fraction: float) -> list:
-    """트라이얼 간 재사용을 위해 고정 샘플 부분집합을 디코딩/캐시한다.
-
-    (split, fraction) 조합마다 최초 1회만 실행하고 이후에는 즉시 캐시를 반환한다.
-    부분집합 선택은 트라이얼 번호와 무관하게 고정 시드(RANDOM_SEED)를 사용하므로
-    모든 트라이얼이 동일한 이미지 집합을 보게 되어 비교 가능성이 높아진다.
-    트라이얼별 변동은 부분집합이 아니라 조립 단계의 crop/prompt/shuffle에서 발생한다.
-    """
-    key = (split, round(fraction, 4))
-    if key in _PRELOADED_SAMPLES:
-        return _PRELOADED_SAMPLES[key]
-
-    # 디스크 캐시: 프로세스 재시작 후에도 유지.
-    # 키를 (split, fraction, MAX_IMAGE_DIM)으로 두어 리사이즈 한도 변경 시 새 캐시를 생성.
-    os.makedirs(PRELOAD_CACHE_DIR, exist_ok=True)
-    cache_file = os.path.join(
-        PRELOAD_CACHE_DIR,
-        f"{split}_f{round(fraction, 4)}_d{MAX_IMAGE_DIM}.pkl",
-    )
-    if os.path.exists(cache_file):
-        try:
-            with open(cache_file, "rb") as f:
-                samples = pickle.load(f)
-            _PRELOADED_SAMPLES[key] = samples
-            logger.info(
-                f"이미지 캐시 디스크에서 로드 — {cache_file}, {len(samples)}개 샘플"
-            )
-            return samples
-        except Exception as e:
-            logger.warning(f"디스크 캐시 로드 실패 ({cache_file}): {e} — 재생성")
-
-    jsonl_path = os.path.join(DATA_DIR, f"{split}.jsonl")
-    total_lines = _get_line_count(jsonl_path)
-
-    # 부분집합 선택 전용 고정 시드 RNG(전역 random 상태에는 영향 없음)
-    _rng = random.Random(RANDOM_SEED)
-    if fraction < 1.0:
-        keep = set(_rng.sample(range(total_lines), int(total_lines * fraction)))
-    else:
-        keep = None
-
-    expected = len(keep) if keep is not None else total_lines
-    logger.info(
-        f"이미지 캐시 적재 시작 — split={split}, fraction={fraction}, "
-        f"~{expected}개 디코딩 예정 (RAM 사용량 주의)"
-    )
-
-    samples = []
-    _preload_t0 = time.time()
-    with open(jsonl_path, "r", encoding="utf-8") as f:
-        for i, line in enumerate(f):
-            if keep is not None and i not in keep:
-                continue
-
-            record = json.loads(line)
-            messages = record["messages"]
-            label = messages[-1]["content"][0]["text"]
-
-            img_rel_path = None
-            for msg in messages:
-                for content in msg["content"]:
-                    if content["type"] == "image" and "image" in content:
-                        img_rel_path = content["image"]
-                        break
-
-            if img_rel_path is None:
-                continue
-
-            img_rel_path = img_rel_path.replace("\\", "/")
-            parts = img_rel_path.split("/")
-            if len(parts) < 3:
-                logger.warning(f"예상치 못한 이미지 경로: {img_rel_path}, 건너뜀")
-                continue
-
-            img_path = os.path.join(DATA_DIR, img_rel_path)
-            if not os.path.exists(img_path):
-                continue
-
-            class_name, img_filename = parts[1], parts[2]
-
-            # 원본 전체 프레임 이미지(1회 디코딩 + 1회 크기 제한)
-            full_img = cap_image_size(Image.open(img_path).convert("RGB"))
-
-            # bbox 좌표는 원본 기준이므로, 축소 전 원본에서 tight crop을 미리 계산
-            # (픽셀 좌표 정확도 보장)
-            tight_img = None
-            if label != "정상":
-                bbox = find_label_json(split, class_name, img_filename)
-                if bbox:
-                    orig = Image.open(img_path).convert("RGB")
-                    tight_img = cap_image_size(
-                        crop_to_bbox(orig, bbox, padding_ratio=0.0)
-                    )
-                    orig.close()
-
-            samples.append(
-                {
-                    "label": label,
-                    "full": full_img,
-                    "tight": tight_img,
-                }
-            )
-
-            if len(samples) % 1000 == 0:
-                elapsed = time.time() - _preload_t0
-                rate = len(samples) / max(elapsed, 1e-3)
-                logger.info(
-                    f"  preload 진행: {len(samples)}/{expected} "
-                    f"({elapsed:.0f}s, {rate:.1f} img/s)"
-                )
-
-    _PRELOADED_SAMPLES[key] = samples
-    try:
-        with open(cache_file, "wb") as f:
-            pickle.dump(samples, f, protocol=pickle.HIGHEST_PROTOCOL)
-        logger.info(f"이미지 캐시 디스크 저장 — {cache_file}")
-    except Exception as e:
-        logger.warning(f"디스크 캐시 저장 실패 ({cache_file}): {e}")
-    logger.info(
-        f"이미지 캐시 적재 완료 — split={split}, fraction={fraction}, "
-        f"{len(samples)}개 샘플 (이후 트라이얼에서 재사용)"
-    )
-    return samples
-
-
-class LazyImageDataset:
-    """__getitem__ 시점 지연 디코딩으로 1회성 실행의 ~20GB 프리로드 비용을 피한다.
-
-    HP_LAZY_DATASET=1 로 활성화한다. eager 경로와 샘플링 의미론은 동일
-    (동일한 fraction 부분집합, 동일한 tight/full 확률, 동일한 라벨)하며,
-    차이는 이미지를 사전 디코딩하지 않고 접근 시점에 디코딩한다는 점이다.
-    메모리 사용량은 O(전체 디코딩 이미지)에서 O(워커 수 × 배치)로 줄어든다.
-    """
-
-    def __init__(self, split, tight_prob, fraction):
-        self.tight_prob = tight_prob
-        self.samples = self._collect_metadata(split, fraction)
-        logger.info(
-            f"LazyImageDataset 생성 — split={split}, "
-            f"{len(self.samples)}개 샘플 (지연 디코딩, 프리로드 생략)"
-        )
-
-    @staticmethod
-    def _collect_metadata(split, fraction):
-        jsonl_path = os.path.join(DATA_DIR, f"{split}.jsonl")
-        total_lines = _get_line_count(jsonl_path)
-        _rng = random.Random(RANDOM_SEED)
-        if fraction < 1.0:
-            keep = set(_rng.sample(range(total_lines), int(total_lines * fraction)))
-        else:
-            keep = None
-
-        out = []
-        with open(jsonl_path, "r", encoding="utf-8") as f:
-            for i, line in enumerate(f):
-                if keep is not None and i not in keep:
-                    continue
-                record = json.loads(line)
-                messages = record["messages"]
-                label = messages[-1]["content"][0]["text"]
-
-                img_rel = None
-                for msg in messages:
-                    for content in msg["content"]:
-                        if content["type"] == "image" and "image" in content:
-                            img_rel = content["image"]
-                            break
-                if img_rel is None:
-                    continue
-
-                img_rel = img_rel.replace("\\", "/")
-                parts = img_rel.split("/")
-                if len(parts) < 3:
-                    continue
-
-                img_path = os.path.join(DATA_DIR, img_rel)
-                if not os.path.exists(img_path):
-                    continue
-
-                class_name, img_filename = parts[1], parts[2]
-                bbox = None
-                if label != "정상":
-                    bbox = find_label_json(split, class_name, img_filename)
-
-                out.append(
-                    {
-                        "label": label,
-                        "img_path": img_path,
-                        "bbox": bbox,
-                    }
-                )
-        return out
-
-    def __len__(self):
-        return len(self.samples)
-
-    def __getitem__(self, idx):
-        if isinstance(idx, slice):
-            return [self[i] for i in range(*idx.indices(len(self.samples)))]
-        meta = self.samples[idx]
-        if meta["bbox"] is not None and random.random() < self.tight_prob:
-            orig = Image.open(meta["img_path"]).convert("RGB")
-            img = cap_image_size(crop_to_bbox(orig, meta["bbox"], padding_ratio=0.0))
-            orig.close()
-        else:
-            img = cap_image_size(Image.open(meta["img_path"]).convert("RGB"))
-        return make_conversation(img, meta["label"])
-
-
 def load_dataset_from_jsonl(split, tight_prob=0.5, fraction=1.0):
-    """캐시된 프리로드 샘플에서 트라이얼별 데이터셋 리스트를 구성한다.
-
-    bbox가 있는 해충 이미지의 경우:
-      - Tight crop(bbox만): 확률 = tight_prob
-      - 원본 이미지(비-crop): 확률 = 1 - tight_prob
-
-    "정상" 이미지와 bbox가 없는 이미지는 항상 원본을 사용한다.
-    트라이얼별 변동은 호출 전에 설정한 전역 random.seed()로 제어한다.
-
-    HP_LAZY_DATASET=1 이면 eagerly-preloaded 리스트 대신
-    LazyImageDataset(__getitem__ 시 디코딩)을 반환한다.
-    1회성 재학습에는 lazy가 유리하고, 다수 트라이얼 HP 탐색에는 eager가 유리하다.
-    """
-    if os.environ.get("HP_LAZY_DATASET") == "1":
-        return LazyImageDataset(split, tight_prob, fraction)
-
-    samples = _preload_samples(split, fraction)
-
-    dataset = []
-    for s in samples:
-        if s["tight"] is None:
-            img = s["full"]
-        elif random.random() < tight_prob:
-            img = s["tight"]
-        else:
-            img = s["full"]
-        dataset.append(make_conversation(img, s["label"]))
-
-    random.shuffle(dataset)
-    return dataset
+    return core_load_dataset_from_jsonl(
+        data_dir=DATA_DIR,
+        split=split,
+        tight_prob=tight_prob,
+        fraction=fraction,
+        random_seed=RANDOM_SEED,
+        preload_cache_dir=PRELOAD_CACHE_DIR,
+        max_image_dim=MAX_IMAGE_DIM,
+        lazy_dataset=os.environ.get("HP_LAZY_DATASET") == "1",
+        logger=logger,
+        system_msg=SYSTEM_MSG,
+        prompts=PROMPTS,
+    )
 
 
 def estimate_proxy_max_steps(
@@ -1063,89 +738,41 @@ def estimate_proxy_max_steps(
     return max(PROXY_STEPS_FLOOR, min(PROXY_STEPS_CEILING, raw_steps))
 
 
+def cleanup_trainer(trainer: object) -> None:
+    if hasattr(trainer, "data_collator"):
+        setattr(trainer, "data_collator", None)
+
+    optimizer = getattr(trainer, "optimizer", None)
+    if isinstance(optimizer, torch.optim.Optimizer):
+        optimizer.zero_grad(set_to_none=True)
+        for group in optimizer.param_groups:
+            group["params"] = []
+    if hasattr(trainer, "optimizer"):
+        setattr(trainer, "optimizer", None)
+
+    if hasattr(trainer, "lr_scheduler"):
+        setattr(trainer, "lr_scheduler", None)
+    if hasattr(trainer, "model"):
+        setattr(trainer, "model", None)
+    if hasattr(trainer, "callback_handler"):
+        setattr(trainer, "callback_handler", None)
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # 5. GPU 메모리 관리
 # ═══════════════════════════════════════════════════════════════════════
 
 
 def clear_gpu_memory():
-    # 순환 참조 해제를 위해 gc를 여러 차례 수행
-    for _ in range(3):
-        gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        torch.cuda.ipc_collect()
-        torch.cuda.reset_peak_memory_stats()
-        torch.cuda.reset_accumulated_memory_stats()
-        torch.cuda.synchronize()
-        allocated = torch.cuda.memory_allocated() / 1024**3
-        reserved = torch.cuda.memory_reserved() / 1024**3
-        logger.info(
-            f"GPU 메모리 — allocated: {allocated:.1f}GB, "
-            f"reserved: {reserved:.1f}GB | peak 초기화됨"
-        )
-
-
-def _has_meta_tensors(model) -> bool:
-    """모델 파라미터 중 meta 디바이스에 남아 있는 항목이 있는지 확인한다."""
-    for name, param in model.named_parameters():
-        if param.device.type == "meta":
-            logger.warning(f"Meta tensor 발견: {name}")
-            return True
-    return False
+    core_clear_gpu_memory(logger=logger)
 
 
 def load_model_with_retry(base_model, max_retries=2):
-    """meta 텐서 검증을 포함해 모델 로딩을 수행하고 실패 시 재시도한다.
-
-    트라이얼이 누적되면 GPU 메모리 단편화로 가중치가 완전히 물질화되지 않아
-    일부 텐서가 meta 디바이스에 남을 수 있다. 이 래퍼는 해당 상황을 감지하고
-    공격적으로 정리한 뒤 다시 로드한다.
-    """
-    from unsloth import FastVisionModel
-
-    last_err = None
-    model = None
-    tokenizer = None
-    for attempt in range(1, max_retries + 1):
-        try:
-            model, tokenizer = FastVisionModel.from_pretrained(
-                base_model,
-                load_in_4bit=False,
-                use_gradient_checkpointing="unsloth",
-            )
-            if _has_meta_tensors(model):
-                raise RuntimeError(
-                    "모델은 로드됐지만 meta tensor가 포함되어 있음: "
-                    "가중치가 완전히 물질화되지 않았습니다"
-                )
-            return model, tokenizer
-        except Exception as e:
-            last_err = e
-            logger.warning(f"모델 로딩 시도 {attempt}/{max_retries} 실패: {e}")
-            # 부분적으로 로드된 객체를 최대한 강하게 해제
-            try:
-                del model
-            except UnboundLocalError:
-                pass
-            try:
-                del tokenizer
-            except UnboundLocalError:
-                pass
-            model = None
-            tokenizer = None
-            for _ in range(5):
-                gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                torch.cuda.ipc_collect()
-                torch.cuda.synchronize()
-            # CUDA가 메모리를 충분히 회수할 짧은 대기
-            time.sleep(2)
-
-    raise RuntimeError(
-        f"모델 로딩 {max_retries}회 시도 후 실패: {last_err}"
-    ) from last_err
+    return core_load_model_with_retry(
+        base_model=base_model,
+        max_retries=max_retries,
+        logger=logger,
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1156,272 +783,16 @@ def load_model_with_retry(base_model, max_retries=2):
 def evaluate_model(
     model, tokenizer, val_dataset, max_samples=200, save_dir=None, trial_num=None
 ):
-    """추론을 수행하고 분류 지표 전체를 계산한다.
-
-    반환값에는 정확도/정밀도/재현율/F1(매크로·가중), 클래스별 지표,
-    혼동 행렬이 포함되며, CM 플롯은 PNG로 저장한다.
-    """
-    from sklearn.metrics import (
-        accuracy_score,
-        precision_score,
-        recall_score,
-        f1_score,
-        confusion_matrix,
+    return core_evaluate_model(
+        model=model,
+        tokenizer=tokenizer,
+        val_dataset=val_dataset,
+        max_samples=max_samples,
+        save_dir=save_dir,
+        trial_num=trial_num,
+        logger=logger,
+        system_msg=SYSTEM_MSG,
     )
-
-    samples = val_dataset[:max_samples]
-    y_true, y_pred = [], []
-    misclassifications = []
-
-    for item in samples:
-        messages = item["messages"]
-        ground_truth = messages[-1]["content"][0]["text"]
-        image = messages[1]["content"][0]["image"]
-
-        infer_messages = [
-            {"role": "system", "content": [{"type": "text", "text": SYSTEM_MSG}]},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image", "image": image},
-                    {"type": "text", "text": messages[1]["content"][1]["text"]},
-                ],
-            },
-        ]
-
-        try:
-            input_text = tokenizer.apply_chat_template(
-                infer_messages, add_generation_prompt=True
-            )
-            inputs = tokenizer(
-                image, input_text, add_special_tokens=False, return_tensors="pt"
-            ).to("cuda")
-
-            with torch.no_grad():
-                output_ids = model.generate(
-                    **inputs,
-                    max_new_tokens=10,
-                    use_cache=True,
-                )
-
-            generated = tokenizer.decode(
-                output_ids[0][inputs["input_ids"].shape[1] :], skip_special_tokens=True
-            ).strip()
-
-            # GPU 메모리 누적 방지를 위해 CUDA 텐서를 즉시 해제
-            del inputs, output_ids
-
-            y_true.append(ground_truth)
-            y_pred.append(generated)
-
-            if generated != ground_truth:
-                misclassifications.append(
-                    {
-                        "truth": ground_truth,
-                        "predicted": generated,
-                    }
-                )
-
-        except Exception as e:
-            logger.warning(f"추론 오류: {e}")
-            continue
-
-    # 추론 루프에서 남은 CUDA 캐시 정리
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-
-    if len(y_true) == 0:
-        return {
-            "accuracy": 0,
-            "f1_macro": 0,
-            "f1_weighted": 0,
-            "precision_macro": 0,
-            "recall_macro": 0,
-            "total": 0,
-        }
-
-    # ─── 전체 클래스 라벨 집합 계산 ───────────────────────────────────
-    all_labels = sorted(set(y_true + y_pred))
-
-    # ─── 핵심 지표 계산 ───────────────────────────────────────────────
-    acc = accuracy_score(y_true, y_pred)
-    # sklearn 타입 스텁 버전에 따라 average/zero_division 타입이 과도하게 좁게 잡힐 수 있다.
-    zero_division = cast(Any, 0)
-    avg_none = cast(Any, None)
-
-    prec_macro = precision_score(
-        y_true, y_pred, labels=all_labels, average="macro", zero_division=zero_division
-    )
-    rec_macro = recall_score(
-        y_true, y_pred, labels=all_labels, average="macro", zero_division=zero_division
-    )
-    f1_macro = f1_score(
-        y_true, y_pred, labels=all_labels, average="macro", zero_division=zero_division
-    )
-    prec_weighted = precision_score(
-        y_true,
-        y_pred,
-        labels=all_labels,
-        average="weighted",
-        zero_division=zero_division,
-    )
-    rec_weighted = recall_score(
-        y_true,
-        y_pred,
-        labels=all_labels,
-        average="weighted",
-        zero_division=zero_division,
-    )
-    f1_weighted = f1_score(
-        y_true,
-        y_pred,
-        labels=all_labels,
-        average="weighted",
-        zero_division=zero_division,
-    )
-
-    # ─── 클래스별 지표 계산 ───────────────────────────────────────────
-    prec_per = precision_score(
-        y_true,
-        y_pred,
-        labels=all_labels,
-        average=avg_none,
-        zero_division=zero_division,
-    )
-    rec_per = recall_score(
-        y_true,
-        y_pred,
-        labels=all_labels,
-        average=avg_none,
-        zero_division=zero_division,
-    )
-    f1_per = f1_score(
-        y_true,
-        y_pred,
-        labels=all_labels,
-        average=avg_none,
-        zero_division=zero_division,
-    )
-
-    def _as_float_list(values: Any, expected_len: int) -> list[float]:
-        # sklearn의 타입 스텁은 scalar/ndarray를 모두 허용해
-        # 정적 분석기에서 인덱싱 경고가 날 수 있으므로 리스트로 정규화한다.
-        if isinstance(values, Iterable) and not isinstance(values, (str, bytes)):
-            return [float(v) for v in values]
-        return [float(values)] * expected_len
-
-    prec_per_list = _as_float_list(prec_per, len(all_labels))
-    rec_per_list = _as_float_list(rec_per, len(all_labels))
-    f1_per_list = _as_float_list(f1_per, len(all_labels))
-
-    per_class = {}
-    for i, cls in enumerate(all_labels):
-        per_class[cls] = {
-            "precision": prec_per_list[i],
-            "recall": rec_per_list[i],
-            "f1": f1_per_list[i],
-            "support": int(y_true.count(cls)),
-        }
-
-    # ─── 혼동 행렬 계산 ───────────────────────────────────────────────
-    cm = confusion_matrix(y_true, y_pred, labels=all_labels)
-    cm_path = None
-
-    if save_dir:
-        os.makedirs(save_dir, exist_ok=True)
-        try:
-            import matplotlib
-
-            matplotlib.use("Agg")
-            import matplotlib.pyplot as plt
-            from matplotlib import font_manager
-
-            # 한국어 표시 가능한 폰트를 우선 시도
-            _korean_keywords = ["nanum", "malgun", "gothic", "gulim", "noto", "cjk"]
-
-            def _find_korean_font():
-                return [
-                    f
-                    for f in font_manager.findSystemFonts()
-                    if any(k in f.lower() for k in _korean_keywords)
-                ]
-
-            korean_fonts = _find_korean_font()
-            if not korean_fonts:
-                # matplotlib 캐시 이후 폰트가 설치됐을 수 있으므로 재탐색
-                font_manager.fontManager = font_manager.FontManager()
-                korean_fonts = _find_korean_font()
-            if korean_fonts:
-                plt.rcParams["font.family"] = font_manager.FontProperties(
-                    fname=korean_fonts[0]
-                ).get_name()
-            plt.rcParams["axes.unicode_minus"] = False
-
-            # 가독성을 위해 라벨을 앞 4글자로 축약
-            short = [lbl[:4] for lbl in all_labels]
-            n = len(all_labels)
-
-            fig_size = max(8, n * 0.6)
-            fig, ax = plt.subplots(figsize=(fig_size, fig_size))
-
-            im = ax.imshow(cm, interpolation="nearest", cmap="Blues")
-            fig.colorbar(im, ax=ax, shrink=0.8)
-
-            ax.set_xticks(range(n))
-            ax.set_yticks(range(n))
-            ax.set_xticklabels(short, rotation=45, ha="right", fontsize=7)
-            ax.set_yticklabels(short, fontsize=7)
-            ax.set_xlabel("예측 (Predicted)")
-            ax.set_ylabel("실제 (Actual)")
-
-            trial_label = f"Trial {trial_num}" if trial_num is not None else ""
-            ax.set_title(
-                f"Confusion Matrix {trial_label}\n"
-                f"Acc={acc:.3f}  F1(macro)={f1_macro:.3f}"
-            )
-
-            # 셀 내부에 개수 표시
-            thresh = cm.max() / 2
-            for i in range(n):
-                for j in range(n):
-                    if cm[i, j] > 0:
-                        ax.text(
-                            j,
-                            i,
-                            str(cm[i, j]),
-                            ha="center",
-                            va="center",
-                            fontsize=6,
-                            color="white" if cm[i, j] > thresh else "black",
-                        )
-
-            plt.tight_layout()
-            cm_path = os.path.join(
-                save_dir, f"confusion_matrix_trial_{trial_num or 'final'}.png"
-            )
-            fig.savefig(cm_path, dpi=150)
-            plt.close(fig)
-            logger.info(f"혼동 행렬 저장됨: {cm_path}")
-
-        except Exception as e:
-            logger.warning(f"혼동 행렬 플롯 실패: {e}")
-
-    # ─── 결과 딕셔너리 구성 ───────────────────────────────────────────
-    return {
-        "accuracy": acc,
-        "precision_macro": prec_macro,
-        "recall_macro": rec_macro,
-        "f1_macro": f1_macro,
-        "precision_weighted": prec_weighted,
-        "recall_weighted": rec_weighted,
-        "f1_weighted": f1_weighted,
-        "per_class": per_class,
-        "confusion_matrix": cm.tolist(),
-        "confusion_matrix_path": cm_path,
-        "total": len(y_true),
-        "correct": int(acc * len(y_true)),
-        "top_misclassifications": misclassifications[:20],
-    }
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1430,11 +801,11 @@ def evaluate_model(
 
 
 def objective(trial: optuna.Trial, args) -> float:
+    from transformers import TrainerCallback
+    from trl.trainer.sft_config import SFTConfig
+    from trl.trainer.sft_trainer import SFTTrainer
     from unsloth import FastVisionModel
     from unsloth.trainer import UnslothVisionDataCollator
-    from trl.trainer.sft_trainer import SFTTrainer
-    from trl.trainer.sft_config import SFTConfig
-    from transformers import TrainerCallback
 
     trial_start = time.time()
     trial_dir = os.path.join(OUTPUT_BASE, f"trial_{trial.number:03d}")
@@ -1511,7 +882,7 @@ def objective(trial: optuna.Trial, args) -> float:
         # ─── W&B 초기화 ───────────────────────────────────────────────
         wandb_run = wandb_init_trial(trial.number, all_params)
 
-        # ─── 데이터 로드(트라이얼별 시드로 독립 부분집합 구성) ───────
+        # ─── 데이터 로드 ───────────────────────────────────────────────
 
         if args.proxy:
             data_fraction = PROXY_DATA_FRACTION
@@ -1531,7 +902,8 @@ def objective(trial: optuna.Trial, args) -> float:
             )
             data_fraction = ram_max_frac
 
-        # 트라이얼별 시드: 각 트라이얼이 서로 다른 부분집합/crop을 보도록 설정
+        # subset 자체는 RANDOM_SEED 기준으로 고정되고,
+        # 트라이얼마다 crop/prompt/shuffle만 달라지도록 시드를 분리한다.
         random.seed(RANDOM_SEED + trial.number)
 
         train_dataset = load_dataset_from_jsonl(
@@ -1863,25 +1235,13 @@ def objective(trial: optuna.Trial, args) -> float:
         _wandb_exit_code = 1
         logger.error(f"트라이얼 {trial.number} 실패: {e}", exc_info=True)
         discord_trial_error(trial.number, str(e)[:500])
-        raise optuna.TrialPruned()
+        raise TrialExecutionError(f"trial {trial.number} failed") from e
 
     finally:
         # 모든 코드 경로에서 정리 보장: 순환 참조를 강하게 끊어
         # 트라이얼 간 GPU 메모리 누수를 방지
         if trainer is not None:
-            cast(Any, trainer).data_collator = None
-            # optimizer -> param 참조를 끊음(주요 누수 원인)
-            if hasattr(trainer, "optimizer") and trainer.optimizer is not None:
-                optimizer = cast(Any, trainer.optimizer)
-                optimizer.zero_grad(set_to_none=True)
-                for group in optimizer.param_groups:
-                    group["params"] = []
-                trainer.optimizer = None
-            if hasattr(trainer, "lr_scheduler"):
-                trainer.lr_scheduler = None
-            if hasattr(trainer, "model"):
-                trainer.model = None
-            cast(Any, trainer).callback_handler = None
+            cleanup_trainer(trainer)
         if model is not None:
             try:
                 model.cpu()  # Move off GPU before deleting
@@ -1922,7 +1282,10 @@ def analyze_study(study: optuna.Study):
         print(f"\n  최적 정확도: {best.user_attrs['accuracy']:.4f}")
 
     completed = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
-    completed_with_value = [t for t in completed if t.value is not None]
+    completed_with_value: list[tuple[float, optuna.trial.FrozenTrial]] = []
+    for trial in completed:
+        if trial.value is not None:
+            completed_with_value.append((float(trial.value), trial))
     pruned = [t for t in study.trials if t.state == optuna.trial.TrialState.PRUNED]
     failed = [t for t in study.trials if t.state == optuna.trial.TrialState.FAIL]
 
@@ -1932,7 +1295,7 @@ def analyze_study(study: optuna.Study):
     print(f"    실패: {len(failed)}")
 
     if completed_with_value:
-        values = [float(cast(float, t.value)) for t in completed_with_value]
+        values = [value for value, _ in completed_with_value]
         print("\n  목적 함수 분포:")
         print(f"    최고: {min(values):.6f}")
         print(f"    최악: {max(values):.6f}")
@@ -1943,9 +1306,8 @@ def analyze_study(study: optuna.Study):
         f"  {'#':>4} {'값':>10} {'학습률':>10} {'R':>4} {'배치':>4} {'에폭':>6} {'비전':>5}"
     )
     print(f"  {'-' * 50}")
-    for t in sorted(completed_with_value, key=lambda t: cast(float, t.value))[:5]:
+    for trial_value, t in sorted(completed_with_value, key=lambda item: item[0])[:5]:
         p = t.params
-        trial_value = cast(float, t.value)
         print(
             f"  {t.number:4d} {trial_value:10.6f} "
             f"{p['learning_rate']:10.2e} {p['lora_r']:4d} "
@@ -2016,10 +1378,10 @@ def analyze_study(study: optuna.Study):
 
 
 def retrain_best(study: optuna.Study):
+    from trl.trainer.sft_config import SFTConfig
+    from trl.trainer.sft_trainer import SFTTrainer
     from unsloth import FastVisionModel
     from unsloth.trainer import UnslothVisionDataCollator
-    from trl.trainer.sft_trainer import SFTTrainer
-    from trl.trainer.sft_config import SFTConfig
 
     best = study.best_trial
     p = best.params
@@ -2190,17 +1552,7 @@ def retrain_best(study: optuna.Study):
 
     finally:
         if trainer is not None:
-            cast(Any, trainer).data_collator = None
-            if hasattr(trainer, "optimizer") and trainer.optimizer is not None:
-                optimizer = cast(Any, trainer.optimizer)
-                optimizer.zero_grad(set_to_none=True)
-                for group in optimizer.param_groups:
-                    group["params"] = []
-                trainer.optimizer = None
-            if hasattr(trainer, "lr_scheduler"):
-                trainer.lr_scheduler = None
-            if hasattr(trainer, "model"):
-                trainer.model = None
+            cleanup_trainer(trainer)
         if model is not None:
             try:
                 model.cpu()
@@ -2231,7 +1583,7 @@ def main():
         "--quick", action="store_true", help="빠른 모드: 1 에폭, 20%% 데이터"
     )
     parser.add_argument(
-        "--proxy", action="store_true", help="프록시 모드: 1 에폭, 10%% 데이터"
+        "--proxy", action="store_true", help="프록시 모드: 1 에폭, 5%% 데이터"
     )
     parser.add_argument("--analyze", action="store_true", help="기존 결과 분석만 수행")
     parser.add_argument("--retrain", action="store_true", help="최적 파라미터로 재학습")
@@ -2323,7 +1675,7 @@ def main():
     if states:
         logger.info(f"스터디 상태: {states}")
 
-    mode = "PROXY (10%)" if args.proxy else "QUICK (20%)" if args.quick else "FULL"
+    mode = "PROXY (5%)" if args.proxy else "QUICK (20%)" if args.quick else "FULL"
 
     logger.info(
         f"\n{'=' * 60}\n"
@@ -2347,6 +1699,7 @@ def main():
         study.optimize(
             lambda trial: objective(trial, args),
             n_trials=args.n_trials,
+            catch=(TrialExecutionError,),
         )
     except Exception:
         discord_error(traceback.format_exc())
@@ -2390,8 +1743,8 @@ def main():
     try:
         from optuna.visualization import (
             plot_optimization_history,
-            plot_param_importances,
             plot_parallel_coordinate,
+            plot_param_importances,
             plot_slice,
         )
 

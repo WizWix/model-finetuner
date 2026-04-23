@@ -17,7 +17,7 @@
 
 ## 설정 파일
 
-모든 실행 설정은 `config.json`에서 관리합니다(JSONC 주석 허용).
+모든 실행 설정은 `config.json`에서 관리합니다(표준 JSON, 주석 미지원).
 
 ### `paths`
 
@@ -38,6 +38,9 @@
 - `random_seed`: 전체 시드
 - `default_n_trials`: HP 탐색 기본 trial 수
 - `wandb_project`, `wandb_entity`: W&B 런 식별 정보
+- `predefined_save_steps`: 고정 파인튜닝 체크포인트 저장 주기 기본값
+- `predefined_eval_steps`: 고정 파인튜닝 평가 주기 기본값
+- `predefined_logging_steps`: 고정 파인튜닝 로그/W&B 기록 주기 기본값
 
 ### `notifications`
 
@@ -73,6 +76,63 @@
 
 `train.py`가 직접 읽는 고정 학습 하이퍼파라미터 묶음입니다.
 LoRA/optimizer/batch/sequence/seed 관련 값이 여기에 모여 있습니다.
+
+## 기능별 필수 설정값
+
+아래 항목은 "해당 기능을 쓰는 경우" 반드시 유효해야 합니다.
+
+### 1) 하이퍼파라미터 탐색 (`run_hp_search.sh`)
+
+- 필수:
+  - `paths.data_dir` (학습 데이터 JSONL + 이미지 위치)
+  - `paths.output_dir` (트라이얼 산출물/분석 결과 저장)
+  - `paths.db_path` (Optuna SQLite DB 저장 경로)
+  - `paths.log_file` (탐색 로그 파일 경로)
+  - `runtime.study_name` (Optuna 스터디 식별자)
+  - `runtime.base_model` (베이스 모델)
+- 조건부 필수:
+  - `auth.hf_token`: 비공개 HF 데이터셋/모델에 접근하는 경우
+  - `auth.wandb_api_key`: W&B 로깅을 켜서 실행하는 경우
+  - `notifications.discord_webhooks`: Discord 알림이 필요한 경우
+
+### 2) 고정 HP 파인튜닝 (`run_predefined_finetune.sh`)
+
+- 필수:
+  - `paths.data_dir`
+  - `paths.final_output_dir`
+  - `runtime.base_model`
+  - `hyperparameters.*` (학습 하이퍼파라미터 세트)
+- 조건부 필수:
+  - `auth.hf_token`: `setup_a6000.sh` 실행 시 필수, 또는 비공개 HF 리소스 접근 시 필요
+  - `huggingface.hf_repo_id` + `auth.hf_token`: 학습 결과를 HF Hub에 업로드할 경우
+  - `auth.wandb_api_key`: W&B 로깅 사용 시
+  - `notifications.discord_webhooks`: 단계별 Discord 알림이 필요한 경우
+
+### 3) DB 백업/릴리즈(GitHub)
+
+- 필수(해당 기능 사용 시):
+  - `github.repo`
+  - `github.backup_db_path_in_repo`
+  - `auth.github_token`
+
+## 고정 파인튜닝 Step 설정 가이드 (W&B 그래프 밀도)
+
+`train.py`는 아래 3개 step 주기를 사용합니다.
+
+- `--logging-steps`: train loss/W&B 포인트 기록 주기 (기본 `10`)
+- `--save-steps`: 체크포인트 저장 주기 (기본 `25`)
+- `--eval-steps`: 평가 주기 (`0`이면 `save_steps`와 동일)
+
+`run_predefined_finetune.sh` 기본값은 `config.runtime.predefined_*`를 우선 사용합니다.
+환경변수(`SAVE_STEPS`, `EVAL_STEPS`, `LOGGING_STEPS`)를 주면 config 값보다 우선합니다.
+
+값을 작게 하면(예: 10) 그래프 포인트(꼭지점)가 많아지고 추세를 세밀하게 볼 수 있지만, 로깅/평가/저장 오버헤드가 증가합니다.
+값을 크게 하면(예: 50) 포인트는 적어지지만 학습 자체 오버헤드는 줄어듭니다.
+
+예시:
+
+- 촘촘한 로깅 + 적당한 평가 주기:
+  - `EXTRA_ARGS="--logging-steps 10 --save-steps 50 --eval-steps 50" bash run_predefined_finetune.sh`
 
 ## 실행 순서
 

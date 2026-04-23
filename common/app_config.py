@@ -1,9 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
 from typing import Any
-
-from .jsonc_utils import load_jsonc
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -36,10 +35,13 @@ def _default_config() -> dict[str, Any]:
             "default_n_trials": 30,
             "wandb_project": "pest-detection-hpsearch",
             "wandb_entity": "",
+            "predefined_save_steps": 50,
+            "predefined_eval_steps": 50,
+            "predefined_logging_steps": 10,
         },
         "notifications": {"discord_webhooks": []},
         "github": {
-            "repo": "pfox1995/pest-hyperparameter-search",
+            "repo": "WizWix/pest-hyperparameter-search",
             "backup_db_path_in_repo": "hp_search_results.db",
         },
         "auth": {
@@ -48,7 +50,7 @@ def _default_config() -> dict[str, Any]:
             "github_token": "",
         },
         "huggingface": {
-            "dataset_repo": "Himedia-AI-01/pest-detection-korean",
+            "dataset_repo": "WizWix/kor-pest-detection-webp",
             "hf_repo_id": "",
         },
         "hyperparameters": {
@@ -79,7 +81,8 @@ def _default_config() -> dict[str, Any]:
 def load_app_config(config_path: str = "config.json") -> dict[str, Any]:
     cfg = _default_config()
     if os.path.exists(config_path):
-        loaded = load_jsonc(config_path)
+        with open(config_path, "r", encoding="utf-8") as f:
+            loaded = json.load(f)
         cfg = _deep_merge(cfg, loaded)
     return cfg
 

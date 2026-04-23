@@ -9,6 +9,13 @@ import requests
 logger = logging.getLogger(__name__)
 
 
+def _redact_webhook(url: str) -> str:
+    parts = url.rstrip("/").split("/")
+    if len(parts) >= 1:
+        parts[-1] = "***"
+    return "/".join(parts)
+
+
 def send_discord(
     webhooks: list[str],
     content: str | None = None,
@@ -32,10 +39,19 @@ def send_discord(
         return
 
     def _send_one(url: str) -> None:
+        safe_url = _redact_webhook(url)
         try:
-            requests.post(url, json=outgoing_payload, timeout=timeout)
+            resp = requests.post(url, json=outgoing_payload, timeout=timeout)
+            if resp.status_code >= 400:
+                body = (resp.text or "").replace("\n", " ").strip()
+                logger.warning(
+                    "Discord 알림 실패 (status=%s, webhook=%s, body=%s)",
+                    resp.status_code,
+                    safe_url,
+                    body[:300],
+                )
         except Exception as exc:
-            logger.warning("Discord 알림 실패 (%s): %s", url, exc)
+            logger.warning("Discord 알림 실패 (webhook=%s): %s", safe_url, exc)
 
     for webhook in webhooks:
         threading.Thread(target=_send_one, args=(webhook,), daemon=True).start()

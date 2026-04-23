@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import random
 import sys
@@ -14,13 +15,32 @@ from typing import Any
 
 import torch
 
-from common.app_config import apply_auth_environment, load_app_config
+from common.app_config import (
+    apply_auth_environment,
+    get_discord_webhooks,
+    load_app_config,
+)
+from common.discord_utils import send_discord
+from common.training_core import (
+    clear_gpu_memory,
+    evaluate_model,
+    get_line_count,
+    get_max_data_fraction,
+    load_dataset_from_jsonl,
+    load_model_with_retry,
+)
+from common.wandb_utils import wandb_is_available
 
 KST = timezone(timedelta(hours=9))
+logger = logging.getLogger(__name__)
 
 
 def build_readme(
-    base_model: str, hp: dict, epochs: int, elapsed_min: float, eval_result: dict | None
+    base_model: str,
+    hp: dict[str, Any],
+    epochs: int,
+    elapsed_min: float,
+    eval_result: dict | None,
 ) -> str:
     metrics_section = ""
     if eval_result:
@@ -87,41 +107,61 @@ FastVisionModel.for_inference(model)
 
 
 def main() -> int:
-    pre_parser = argparse.ArgumentParser(add_help=False)
-    pre_parser.add_argument("--config", default="config.json")
-    pre_args, _ = pre_parser.parse_known_args()
-    cfg = load_app_config(pre_args.config)
-    apply_auth_environment(cfg)
-
-    paths = cfg.get("paths", {})
-    hp = cfg.get("hyperparameters", {})
-
     parser = argparse.ArgumentParser(description="고정 HP 파인튜닝")
-    parser.add_argument("--config", default=pre_args.config)
+    parser.add_argument("--config", default="config.json")
     parser.add_argument("--epochs", type=int, default=1)
-    parser.add_argument(
-        "--output-dir",
-        default=paths.get("final_output_dir", "/workspace/best-pest-detector"),
-    )
+    parser.add_argument("--output-dir", default=None)
     parser.add_argument("--save-steps", type=int, default=25)
+    parser.add_argument(
+        "--eval-steps",
+        type=int,
+        default=0,
+        help="0이면 save_steps 값을 사용합니다.",
+    )
+    parser.add_argument(
+        "--logging-steps",
+        type=int,
+        default=10,
+        help="학습 로그/W&B 기록 주기(step 단위).",
+    )
     parser.add_argument("--eval-samples", type=int, default=-1)
     parser.add_argument("--no-eval", action="store_true")
     parser.add_argument("--no-wandb", action="store_true")
-    parser.add_argument(
-        "--hf-repo", default=cfg.get("huggingface", {}).get("hf_repo_id", "")
-    )
+    parser.add_argument("--hf-repo", default="")
     args = parser.parse_args()
+    if args.epochs <= 0:
+        raise ValueError("--epochs는 1 이상이어야 합니다.")
+    if args.save_steps <= 0:
+        raise ValueError("--save-steps는 1 이상이어야 합니다.")
+    if args.eval_steps < 0:
+        raise ValueError("--eval-steps는 0 이상이어야 합니다.")
+    if args.logging_steps <= 0:
+        raise ValueError("--logging-steps는 1 이상이어야 합니다.")
 
     cfg = load_app_config(args.config)
     apply_auth_environment(cfg)
 
-    import hp_search
-
-    hp_search.initialize_from_config(args.config)
+    paths = cfg.get("paths", {})
+    runtime = cfg.get("runtime", {})
     hp = cfg.get("hyperparameters", {})
+    base_model = runtime.get("base_model", "unsloth/Qwen3.5-9B")
+    data_dir = paths.get("data_dir", "/workspace/data")
+    preload_cache_dir = paths.get("preload_cache_dir", "/workspace/preload_cache")
+    output_dir = args.output_dir or paths.get(
+        "final_output_dir", "/workspace/best-pest-detector"
+    )
+    wandb_project = runtime.get("wandb_project", "pest-detection-hpsearch")
+    wandb_entity = runtime.get("wandb_entity", "")
 
-    # 원본 run.sh 동작을 유지하기 위해 고정 파인튜닝은 lazy dataset을 기본 사용한다.
-    os.environ["HP_LAZY_DATASET"] = "1"
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+    )
+
+    webhooks = get_discord_webhooks(cfg)
+
+    def notify(content: str) -> None:
+        send_discord(webhooks, content=content, timeout=10)
 
     random.seed(hp["seed"])
     torch.manual_seed(hp["seed"])
@@ -132,7 +172,7 @@ def main() -> int:
     gpu_name = torch.cuda.get_device_name(0)
     vram_gb = torch.cuda.get_device_properties(0).total_memory / 1024**3
     capability = torch.cuda.get_device_capability(0)
-    hp_search.logger.info(
+    logger.info(
         "GPU: %s | VRAM: %.0fGB | compute_capability: sm_%s%s",
         gpu_name,
         vram_gb,
@@ -140,30 +180,48 @@ def main() -> int:
         capability[1],
     )
 
-    os.makedirs(args.output_dir, exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True)
 
-    hp_search.logger.info("데이터셋 로딩 중...")
-    n_train_total = hp_search._get_line_count(
-        os.path.join(hp_search.DATA_DIR, "train.jsonl")
-    )
-    train_frac = hp_search.get_max_data_fraction(n_train_total)
-    train_dataset = hp_search.load_dataset_from_jsonl(
-        "train",
+    logger.info("데이터셋 로딩 중...")
+    n_train_total = get_line_count(os.path.join(data_dir, "train.jsonl"))
+    train_frac = get_max_data_fraction(n_train_total)
+    train_dataset = load_dataset_from_jsonl(
+        data_dir=data_dir,
+        split="train",
         tight_prob=hp["crop_tight_prob"],
         fraction=train_frac,
+        random_seed=hp["seed"],
+        preload_cache_dir=preload_cache_dir,
+        max_image_dim=768,
+        lazy_dataset=True,
+        logger=logger,
     )
-    val_dataset = hp_search.load_dataset_from_jsonl("val")
+    val_dataset = load_dataset_from_jsonl(
+        data_dir=data_dir,
+        split="val",
+        random_seed=hp["seed"],
+        preload_cache_dir=preload_cache_dir,
+        max_image_dim=768,
+        lazy_dataset=True,
+        logger=logger,
+    )
     n_val = len(val_dataset)
     eval_samples = n_val if args.eval_samples < 0 else min(args.eval_samples, n_val)
+    notify(
+        f"📦 **데이터셋 로딩 완료**\n"
+        f"• 학습 샘플: {len(train_dataset)}\n"
+        f"• 검증 샘플: {n_val}\n"
+        f"• 평가 샘플 수: {eval_samples}"
+    )
 
-    hp_search.clear_gpu_memory()
-    hp_search.logger.info("모델 로딩: %s", hp_search.BASE_MODEL)
-    model, tokenizer = hp_search.load_model_with_retry(hp_search.BASE_MODEL)
+    clear_gpu_memory(logger=logger)
+    logger.info("모델 로딩: %s", base_model)
+    model, tokenizer = load_model_with_retry(base_model=base_model, logger=logger)
 
-    from unsloth import FastVisionModel
-    from unsloth.trainer import UnslothVisionDataCollator
     from trl.trainer.sft_config import SFTConfig
     from trl.trainer.sft_trainer import SFTTrainer
+    from unsloth import FastVisionModel
+    from unsloth.trainer import UnslothVisionDataCollator
 
     model = FastVisionModel.get_peft_model(
         model,
@@ -182,19 +240,21 @@ def main() -> int:
 
     wandb_run = None
     report_to = "none"
-    if not args.no_wandb and hp_search.wandb_is_available():
+    if not args.no_wandb and wandb_is_available(logger=logger):
         import wandb
 
         run_name = f"predefined-{datetime.now(KST).strftime('%m%d-%H%M')}"
         wandb_run = wandb.init(
-            project=hp_search.WANDB_PROJECT,
-            entity=hp_search.WANDB_ENTITY or None,
+            project=wandb_project,
+            entity=wandb_entity or None,
             name=run_name,
             config={**hp, "num_train_epochs": args.epochs},
             tags=["predefined-finetune"],
             reinit=True,
         )
         report_to = "wandb"
+
+    eval_steps = args.save_steps if args.eval_steps == 0 else args.eval_steps
 
     sft_config_kwargs: dict[str, Any] = {
         "per_device_train_batch_size": hp["per_device_train_batch_size"],
@@ -220,16 +280,16 @@ def main() -> int:
         "save_steps": args.save_steps,
         "save_total_limit": 3,
         "eval_strategy": ("steps" if not args.no_eval else "no"),
-        "eval_steps": args.save_steps,
+        "eval_steps": eval_steps,
         "eval_accumulation_steps": 2,
         "load_best_model_at_end": (not args.no_eval),
         "metric_for_best_model": "eval_loss" if not args.no_eval else None,
         "greater_is_better": False,
-        "logging_steps": 20,
+        "logging_steps": args.logging_steps,
         "logging_strategy": "steps",
         "seed": hp["seed"],
         "data_seed": hp["data_seed"],
-        "output_dir": args.output_dir,
+        "output_dir": output_dir,
         "report_to": report_to,
         "remove_unused_columns": False,
         "dataset_text_field": "",
@@ -240,54 +300,68 @@ def main() -> int:
 
     trainer_kwargs: dict[str, Any] = {
         "model": model,
-        "tokenizer": tokenizer,
+        "processing_class": tokenizer,
         "data_collator": UnslothVisionDataCollator(model, tokenizer),
         "train_dataset": train_dataset,
         "eval_dataset": val_dataset if not args.no_eval else None,
         "args": sft_args,
     }
     trainer = SFTTrainer(**trainer_kwargs)
+    notify(
+        f"🧱 **모델/트레이너 준비 완료**\n"
+        f"• 모델: {base_model}\n"
+        f"• 출력 경로: `{output_dir}`\n"
+        f"• save/eval/logging steps: {args.save_steps}/{eval_steps}/{args.logging_steps}"
+    )
 
-    hp_search.discord_send(
-        f"🚀 **고정 HP 파인튜닝 시작**\\n"
-        f"• 에폭: {args.epochs}\\n"
-        f"• LR: {hp['learning_rate']:.2e}\\n"
-        f"• LoRA r={hp['lora_r']}, α={hp['lora_alpha']}\\n"
-        f"• 학습 샘플: {len(train_dataset)}\\n"
-        f"• 검증 샘플: {n_val}\\n"
-        f"• 평가 샘플 수: {eval_samples}"
+    notify(
+        f"🚀 **고정 HP 파인튜닝 시작**\n"
+        f"• 에폭: {args.epochs}\n"
+        f"• LR: {hp['learning_rate']:.2e}\n"
+        f"• LoRA r={hp['lora_r']}, α={hp['lora_alpha']}\n"
+        f"• 학습 샘플: {len(train_dataset)}\n"
+        f"• 검증 샘플: {n_val}\n"
+        f"• 평가 샘플 수: {eval_samples}\n"
+        f"• save/eval/logging steps: {args.save_steps}/{eval_steps}/{args.logging_steps}"
     )
 
     t0 = time.time()
+    notify("🏋️ **학습 루프 시작**")
     trainer.train()
     elapsed_min = (time.time() - t0) / 60
+    notify(f"✅ **학습 루프 완료**\n• 소요 시간: {elapsed_min:.1f}분")
 
-    lora_dir = os.path.join(args.output_dir, "lora")
+    lora_dir = os.path.join(output_dir, "lora")
     model.save_pretrained(lora_dir)
     tokenizer.save_pretrained(lora_dir)
 
     eval_result = None
     if not args.no_eval:
         FastVisionModel.for_inference(model)
-        eval_dir = os.path.join(args.output_dir, "evaluation")
-        eval_result = hp_search.evaluate_model(
-            model,
-            tokenizer,
-            val_dataset,
+        eval_dir = os.path.join(output_dir, "evaluation")
+        eval_result = evaluate_model(
+            model=model,
+            tokenizer=tokenizer,
+            val_dataset=val_dataset,
             max_samples=eval_samples,
             save_dir=eval_dir,
             trial_num="predefined-finetune",
+            logger=logger,
+        )
+        notify(
+            f"🧪 **평가 완료**\n"
+            f"• Accuracy: {eval_result.get('accuracy', 0.0):.4f}\n"
+            f"• F1(macro): {eval_result.get('f1_macro', 0.0):.4f}\n"
+            f"• F1(weighted): {eval_result.get('f1_weighted', 0.0):.4f}"
         )
         with open(os.path.join(eval_dir, "metrics.json"), "w", encoding="utf-8") as f:
             json.dump(eval_result, f, indent=2, ensure_ascii=False, default=str)
+    else:
+        notify("🧪 **평가 스킵됨** (`--no-eval`)")
 
-    readme_path = os.path.join(args.output_dir, "README.md")
+    readme_path = os.path.join(output_dir, "README.md")
     with open(readme_path, "w", encoding="utf-8") as f:
-        f.write(
-            build_readme(
-                hp_search.BASE_MODEL, hp, args.epochs, elapsed_min, eval_result
-            )
-        )
+        f.write(build_readme(base_model, hp, args.epochs, elapsed_min, eval_result))
 
     hf_repo = args.hf_repo or cfg.get("huggingface", {}).get("hf_repo_id", "")
     hf_token = os.environ.get("HF_TOKEN")
@@ -297,7 +371,7 @@ def main() -> int:
             tokenizer.push_to_hub(hf_repo, token=hf_token, private=True)
             from huggingface_hub import upload_file, upload_folder
 
-            eval_dir = os.path.join(args.output_dir, "evaluation")
+            eval_dir = os.path.join(output_dir, "evaluation")
             if os.path.isdir(eval_dir):
                 upload_folder(
                     folder_path=eval_dir,
@@ -311,13 +385,22 @@ def main() -> int:
                 repo_id=hf_repo,
                 token=hf_token,
             )
+            notify(f"📤 **Hugging Face 업로드 완료**\n• Repo: `{hf_repo}`")
         except Exception as exc:
-            hp_search.logger.exception("HF 업로드 실패: %s", exc)
+            logger.exception("HF 업로드 실패: %s", exc)
+            notify(
+                f"⚠️ **Hugging Face 업로드 실패**\n• Repo: `{hf_repo}`\n• 오류: `{exc}`"
+            )
 
     if wandb_run:
         wandb_run.finish()
 
-    hp_search.logger.info("완료: %s", lora_dir)
+    logger.info("완료: %s", lora_dir)
+    notify(
+        f"🎉 **고정 HP 파인튜닝 전체 완료**\n"
+        f"• LoRA 출력: `{lora_dir}`\n"
+        f"• 소요 시간: {elapsed_min:.1f}분"
+    )
     return 0
 
 

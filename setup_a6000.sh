@@ -11,12 +11,10 @@ fi
 
 read_cfg() {
   python3 - "$CONFIG_PATH" "$1" << 'PY'
-import json, re, sys
+import json, sys
 path, key = sys.argv[1], sys.argv[2]
-text = open(path, encoding='utf-8').read()
-text = re.sub(r'/\*.*?\*/', '', text, flags=re.S)
-text = re.sub(r'//.*', '', text)
-cfg = json.loads(text)
+with open(path, encoding='utf-8') as f:
+    cfg = json.load(f)
 obj = cfg
 for part in key.split('.'):
     if isinstance(obj, dict):

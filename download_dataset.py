@@ -6,11 +6,13 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import inspect
 import logging
 import os
 import time
-from typing import Any, cast
+from collections.abc import Callable
+from typing import Any
 
 from common.app_config import apply_auth_environment, load_app_config
 
@@ -24,14 +26,13 @@ INITIAL_BACKOFF = 30
 REQUIRED_FILES = ["train.jsonl", "val.jsonl"]
 
 
+def call_with_kwargs(func: Callable[..., Any], kwargs: dict[str, Any]) -> Any:
+    return func(**kwargs)
+
+
 def check_hf_transfer() -> None:
     enabled = os.environ.get("HF_HUB_ENABLE_HF_TRANSFER", "0") == "1"
-    try:
-        import hf_transfer  # noqa: F401
-
-        installed = True
-    except ImportError:
-        installed = False
+    installed = importlib.util.find_spec("hf_transfer") is not None
 
     if installed and enabled:
         logger.info("hf_transfer 활성화됨")
@@ -106,7 +107,7 @@ def download_with_retry(repo_id: str, data_dir: str, token: str | None) -> bool:
                 elif "use_auth_token" in params:
                     kwargs["use_auth_token"] = token
 
-            cast(Any, snapshot_download)(**kwargs)
+            call_with_kwargs(snapshot_download, kwargs)
             return True
         except HfHubHTTPError as exc:
             text = str(exc).lower()

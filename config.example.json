@@ -13,12 +13,15 @@
   "runtime": {
     "study_name": "pest-detection-hpsearch",
     "base_model": "unsloth/Qwen3.5-9B",
+    "random_seed": 42,
     "default_n_trials": 30,
     "wandb_project": "pest-detection-hpsearch",
-    "wandb_entity": ""
+    "wandb_entity": "",
+    "predefined_save_steps": 50,
+    "predefined_eval_steps": 50,
+    "predefined_logging_steps": 10
   },
   "notifications": {
-    // 반드시 배열 사용
     "discord_webhooks": [
       "https://discord.com/api/webhooks/REPLACE_ME"
     ]
@@ -32,7 +35,7 @@
     "github_token": ""
   },
   "huggingface": {
-    "dataset_repo": "Himedia-AI-01/pest-detection-korean",
+    "dataset_repo": "WizWix/pest-detection-korean",
     "hf_repo_id": "owner/model-repo"
   },
   "hyperparameters": {
