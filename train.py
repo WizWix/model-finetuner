@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import random
+import shutil
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -34,6 +35,15 @@ from common.wandb_utils import wandb_is_available
 
 KST = timezone(timedelta(hours=9))
 logger = logging.getLogger(__name__)
+
+
+def get_free_space_gb(path: str) -> float:
+    """경로가 위치한 디스크의 가용 공간(GB)을 반환한다. 확인 실패 시 -1."""
+    try:
+        usage = shutil.disk_usage(path)
+        return usage.free / (1024**3)
+    except OSError:
+        return -1.0
 
 
 def build_readme(
@@ -129,6 +139,19 @@ def main() -> int:
     parser.add_argument("--no-eval", action="store_true")
     parser.add_argument("--no-wandb", action="store_true")
     parser.add_argument("--hf-repo", default="")
+    parser.add_argument(
+        "--save-only-model",
+        dest="save_only_model",
+        action="store_true",
+        default=None,
+        help="중간 체크포인트에 옵티마이저/스케줄러 상태를 저장하지 않습니다.",
+    )
+    parser.add_argument(
+        "--save-full-state",
+        dest="save_only_model",
+        action="store_false",
+        help="중간 체크포인트에 옵티마이저/스케줄러 상태를 포함해 저장합니다.",
+    )
     args = parser.parse_args()
     if args.epochs <= 0:
         raise ValueError("--epochs는 1 이상이어야 합니다.")
@@ -153,6 +176,11 @@ def main() -> int:
     )
     wandb_project = runtime.get("wandb_project", "pest-detection-hpsearch")
     wandb_entity = runtime.get("wandb_entity", "")
+    save_only_model_default = bool(runtime.get("predefined_save_only_model", True))
+    save_only_model = (
+        save_only_model_default if args.save_only_model is None else args.save_only_model
+    )
+    min_free_space_gb = float(runtime.get("predefined_min_free_space_gb", 8))
 
     logging.basicConfig(
         level=logging.INFO,
@@ -179,6 +207,14 @@ def main() -> int:
     )
 
     os.makedirs(output_dir, exist_ok=True)
+    free_space_gb = get_free_space_gb(output_dir)
+    if 0 <= free_space_gb < min_free_space_gb:
+        logger.warning(
+            "출력 경로 디스크 여유 공간이 낮습니다: %.2fGB (< %.2fGB, output_dir=%s)",
+            free_space_gb,
+            min_free_space_gb,
+            output_dir,
+        )
 
     logger.info("데이터셋 로딩 중...")
     send_discord(
@@ -313,6 +349,13 @@ def main() -> int:
         "dataset_kwargs": {"skip_prepare_dataset": True},
     }
     sft_init_params = inspect.signature(SFTConfig.__init__).parameters
+    if "save_only_model" in sft_init_params:
+        sft_config_kwargs["save_only_model"] = save_only_model
+    else:
+        logger.warning(
+            "SFTConfig에서 save_only_model 인자를 지원하지 않습니다. "
+            "옵티마이저 상태 체크포인트가 저장될 수 있습니다."
+        )
     if "max_seq_length" in sft_init_params:
         sft_config_kwargs["max_seq_length"] = hp["max_seq_length"]
     elif "max_length" in sft_init_params:
@@ -340,7 +383,7 @@ def main() -> int:
                     "author": {"name": "AI 모델 파인튜너"},
                     "color": 3066993,
                     "title": "🧱 모델/트레이너 준비 완료",
-                    "description": f"- 모델: {base_model}\n- 출력 경로: {output_dir}\n- save/eval/logging steps: {args.save_steps}/{eval_steps}/{args.logging_steps}",
+                    "description": f"- 모델: {base_model}\n- 출력 경로: {output_dir}\n- save/eval/logging steps: {args.save_steps}/{eval_steps}/{args.logging_steps}\n- save_only_model: {save_only_model}",
                 }
             ]
         },
@@ -354,7 +397,7 @@ def main() -> int:
                     "author": {"name": "AI 모델 파인튜너"},
                     "color": 3066993,
                     "title": "🚀 고정 HP 파인튜닝 시작",
-                    "description": f"- 에폭: {args.epochs}\n- LR: {hp['learning_rate']:.2e}\n- LoRA r={hp['lora_r']}, alpha={hp['lora_alpha']}\n- 학습 샘플: {len(train_dataset)}\n- 검증 샘플: {n_val}\n- 평가 샘플 수: {eval_samples}\n- save/eval/logging steps: {args.save_steps}/{eval_steps}/{args.logging_steps}",
+                    "description": f"- 에폭: {args.epochs}\n- LR: {hp['learning_rate']:.2e}\n- LoRA r={hp['lora_r']}, alpha={hp['lora_alpha']}\n- 학습 샘플: {len(train_dataset)}\n- 검증 샘플: {n_val}\n- 평가 샘플 수: {eval_samples}\n- save/eval/logging steps: {args.save_steps}/{eval_steps}/{args.logging_steps}\n- save_only_model: {save_only_model}",
                 }
             ]
         },
@@ -373,7 +416,40 @@ def main() -> int:
             ]
         },
     )
-    trainer.train()
+    try:
+        trainer.train()
+    except RuntimeError as exc:
+        error_text = str(exc)
+        if "inline_container.cc" in error_text and "unexpected pos" in error_text:
+            free_space_gb = get_free_space_gb(output_dir)
+            hint = (
+                "체크포인트 저장 중 파일 쓰기가 중단되었습니다. "
+                "디스크 공간 부족 또는 파일시스템 I/O 오류 가능성이 큽니다."
+            )
+            logger.error(
+                "%s output_dir=%s free_space_gb=%.2f save_only_model=%s",
+                hint,
+                output_dir,
+                free_space_gb,
+                save_only_model,
+            )
+            send_discord(
+                webhooks,
+                embed={
+                    "embeds": [
+                        {
+                            "author": {"name": "AI 모델 파인튜너"},
+                            "color": 15277667,
+                            "title": "❌ 체크포인트 저장 실패",
+                            "description": f"- 원인 추정: 디스크 공간 부족 또는 파일시스템 I/O 오류\n- output_dir: `{output_dir}`\n- free_space_gb: {free_space_gb:.2f}\n- save_only_model: {save_only_model}",
+                        }
+                    ]
+                },
+            )
+            raise RuntimeError(
+                f"{hint} output_dir={output_dir}, free_space_gb={free_space_gb:.2f}, save_only_model={save_only_model}"
+            ) from exc
+        raise
     elapsed_min = (time.time() - t0) / 60
     send_discord(
         webhooks,

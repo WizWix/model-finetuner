@@ -13,6 +13,7 @@ LOGGING_STEPS="${LOGGING_STEPS:-}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TRAIN_PY="$SCRIPT_DIR/train.py"
 WATCH_SH="$SCRIPT_DIR/watch_golden.sh"
+DISABLE_GOLDEN_WATCH="${DISABLE_GOLDEN_WATCH:-0}"
 PY_RUN="python3"
 if command -v uv > /dev/null 2>&1 && [ -f "$SCRIPT_DIR/pyproject.toml" ]; then
   PY_RUN="uv run --no-sync python"
@@ -84,7 +85,7 @@ tmux new-session -d -s "$SESSION" bash -c "
   exec bash
 "
 
-if [ -f "$WATCH_SH" ] && ! tmux has-session -t golden 2> /dev/null; then
+if [ "$DISABLE_GOLDEN_WATCH" != "1" ] && [ -f "$WATCH_SH" ] && ! tmux has-session -t golden 2> /dev/null; then
   CONFIG_PATH="$CONFIG_PATH" tmux new-session -d -s golden "bash '$WATCH_SH'"
 fi
 
@@ -92,3 +93,6 @@ echo "tmux 세션 '$SESSION'에서 고정 HP 파인튜닝을 시작했습니다.
 echo "  접속: tmux -u attach -t $SESSION"
 echo "  로그: $LOG"
 echo "  step 설정(save/eval/logging): $SAVE_STEPS/$EVAL_STEPS/$LOGGING_STEPS"
+if [ "$DISABLE_GOLDEN_WATCH" = "1" ]; then
+  echo "  golden watcher: 비활성화(DISABLE_GOLDEN_WATCH=1)"
+fi

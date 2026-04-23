@@ -41,6 +41,8 @@
 - `predefined_save_steps`: 고정 파인튜닝 체크포인트 저장 주기 기본값
 - `predefined_eval_steps`: 고정 파인튜닝 평가 주기 기본값
 - `predefined_logging_steps`: 고정 파인튜닝 로그/W&B 기록 주기 기본값
+- `predefined_save_only_model`: 고정 파인튜닝 체크포인트에서 옵티마이저/스케줄러 저장 생략 여부(기본 `true`)
+- `predefined_min_free_space_gb`: 경고를 띄울 최소 디스크 여유 공간(GB)
 
 ### `notifications`
 
@@ -122,9 +124,12 @@ LoRA/optimizer/batch/sequence/seed 관련 값이 여기에 모여 있습니다.
 - `--logging-steps`: train loss/W&B 포인트 기록 주기 (기본 `10`)
 - `--save-steps`: 체크포인트 저장 주기 (기본 `25`)
 - `--eval-steps`: 평가 주기 (`0`이면 `save_steps`와 동일)
+- `--save-only-model`: 체크포인트에서 옵티마이저/스케줄러 상태 저장 생략
+- `--save-full-state`: 체크포인트에 옵티마이저/스케줄러 상태까지 포함 저장
 
 `run_predefined_finetune.sh` 기본값은 `config.runtime.predefined_*`를 우선 사용합니다.
 환경변수(`SAVE_STEPS`, `EVAL_STEPS`, `LOGGING_STEPS`)를 주면 config 값보다 우선합니다.
+`DISABLE_GOLDEN_WATCH=1`을 주면 `watch_golden.sh` 사이드카를 시작하지 않습니다(추가 디스크 사용 방지).
 
 값을 작게 하면(예: 10) 그래프 포인트(꼭지점)가 많아지고 추세를 세밀하게 볼 수 있지만, 로깅/평가/저장 오버헤드가 증가합니다.
 값을 크게 하면(예: 50) 포인트는 적어지지만 학습 자체 오버헤드는 줄어듭니다.

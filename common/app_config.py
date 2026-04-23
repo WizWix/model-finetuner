@@ -38,6 +38,8 @@ def _default_config() -> dict[str, Any]:
             "predefined_save_steps": 50,
             "predefined_eval_steps": 50,
             "predefined_logging_steps": 10,
+            "predefined_save_only_model": True,
+            "predefined_min_free_space_gb": 8,
         },
         "notifications": {"discord_webhooks": []},
         "github": {
