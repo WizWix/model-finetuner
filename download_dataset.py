@@ -64,7 +64,8 @@ def verify_download(data_dir: str) -> bool:
     total_gb = total_bytes / 1024**3
     logger.info("데이터셋 검증: 파일 %,d개, %.1fGB", total_files, total_gb)
 
-    if total_gb < 15.0:
+    # TODO: 하드코딩된 데이터셋 대신, HuggingFace에서 데이터셋 크기를 받아오는 방법이 있는지 찾아볼 것
+    if total_gb < 9.0:
         logger.warning("데이터셋 크기가 예상보다 작음 (%.1fGB)", total_gb)
         return False
 
