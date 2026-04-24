@@ -1,65 +1,67 @@
 {
   "paths": {
-    "data_dir": "/workspace/data",
-    "volume_dir": "/workspace",
-    "output_dir": "/workspace/hp_search_outputs",
     "best_model_dir": "/workspace/best-pest-detector",
+    "data_dir": "/workspace/data",
     "db_path": "/workspace/hp_search_results.db",
-    "log_file": "/workspace/hp_search.log",
-    "preload_cache_dir": "/workspace/preload_cache",
     "final_output_dir": "/workspace/best-pest-detector",
-    "golden_dir": "/workspace/_golden"
+    "golden_dir": "/workspace/_golden",
+    "log_file": "/workspace/hp_search.log",
+    "output_dir": "/workspace/hp_search_outputs",
+    "preload_cache_dir": "/workspace/preload_cache",
+    "volume_dir": "/workspace"
   },
   "runtime": {
-    "study_name": "pest-detection-hpsearch",
     "base_model": "unsloth/Qwen3.5-9B",
-    "random_seed": 42,
+    "dataloader_num_workers": 8,
     "default_n_trials": 30,
-    "wandb_project": "pest-detection-hpsearch",
-    "wandb_entity": "",
-    "predefined_save_steps": 50,
     "predefined_eval_steps": 50,
     "predefined_logging_steps": 10,
+    "predefined_min_free_space_gb": 8,
     "predefined_save_only_model": true,
-    "predefined_min_free_space_gb": 8
+    "predefined_save_steps": 50,
+    "random_seed": 42,
+    "study_name": "wandb-study-name",
+    "wandb_entity": "team-name",
+    "wandb_project": "wandb-project-name"
   },
   "notifications": {
     "discord_webhooks": [
-      "https://discord.com/api/webhooks/REPLACE_ME"
+      "https://discord.com/api/webhooks/"
     ]
   },
   "github": {
-    "repo": "owner/repo"
+    "backup_db_path_in_repo": "hp_search_results.db",
+    "repo": "your-name/result-save-repo"
   },
   "auth": {
+    "github_token": "",
     "hf_token": "",
-    "wandb_api_key": "",
-    "github_token": ""
+    "wandb_api_key": ""
   },
   "huggingface": {
-    "dataset_repo": "WizWix/pest-detection-korean",
-    "hf_repo_id": "owner/model-repo"
+    "dataset_repo": "your-name/dataset-repo",
+    "hf_repo_id": "your-name/model-adapter-repo"
   },
   "hyperparameters": {
-    "lora_r": 64,
-    "lora_alpha": 128,
-    "use_rslora": true,
-    "lora_dropout": 0.0,
-    "finetune_vision": false,
-    "learning_rate": 0.0001,
-    "weight_decay": 0.01,
-    "lr_scheduler_type": "linear",
-    "warmup_ratio": 0.03,
-    "max_grad_norm": 1.0,
     "adam_beta1": 0.9,
     "adam_beta2": 0.999,
     "adam_epsilon": 1e-8,
+    "crop_tight_prob": 0.4560998466814129,
+    "data_seed": 3407,
+    "finetune_vision": false,
+    "gradient_accumulation_steps": 8,
+    "learning_rate": 0.00011645105452323228,
+    "lora_alpha": 128,
+    "lora_dropout": 0.0,
+    "lora_r": 64,
+    "lr_scheduler_type": "linear",
+    "max_grad_norm": 1.0,
+    "max_seq_length": 1024,
     "optim": "adamw_torch",
     "per_device_train_batch_size": 1,
-    "gradient_accumulation_steps": 8,
-    "max_seq_length": 1024,
-    "crop_tight_prob": 0.45,
     "seed": 42,
-    "data_seed": 3407
+    "use_rslora": true,
+    "warmup_ratio": 0.03,
+    "weight_decay": 0.013802470048539942
   }
 }
