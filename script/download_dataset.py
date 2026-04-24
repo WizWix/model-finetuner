@@ -62,7 +62,9 @@ def verify_download(data_dir: str) -> bool:
             total_bytes += os.path.getsize(path)
 
     total_gb = total_bytes / 1024**3
-    logger.info("데이터셋 검증: 파일 %,d개, %.1fGB", total_files, total_gb)
+    logger.info(
+        "데이터셋 검증: 파일 %s개, %.1fGB", format(total_files, ",d"), total_gb
+    )
 
     # TODO: 하드코딩된 데이터셋 대신, HuggingFace에서 데이터셋 크기를 받아오는 방법이 있는지 찾아볼 것
     if total_gb < 9.0:
@@ -73,7 +75,7 @@ def verify_download(data_dir: str) -> bool:
         path = os.path.join(data_dir, name)
         with open(path, "r", encoding="utf-8") as f:
             n_lines = sum(1 for _ in f)
-        logger.info("%s: 샘플 %,d개", name, n_lines)
+        logger.info("%s: 샘플 %s개", name, format(n_lines, ",d"))
 
     return True
 
