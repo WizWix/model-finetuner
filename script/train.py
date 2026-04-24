@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+# NOTE: Keep this before transformers/peft imports.
+import unsloth  # noqa: F401  # isort: skip
 import argparse
 import json
 import logging
@@ -685,9 +687,9 @@ def main() -> int:
     logger.info("모델 로딩: %s", base_model)
     model, tokenizer = load_model_with_retry(base_model=base_model, logger=logger)
 
+    from unsloth import FastVisionModel
     from trl.trainer.sft_config import SFTConfig
     from trl.trainer.sft_trainer import SFTTrainer
-    from unsloth import FastVisionModel
     from unsloth.trainer import UnslothVisionDataCollator
 
     model = FastVisionModel.get_peft_model(

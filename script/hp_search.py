@@ -24,6 +24,8 @@ Optuna + Unsloth + SFTTrainer + W&B + Discord 알림
     WANDB_ENTITY           — W&B 팀/사용자명
 """
 
+# NOTE: Keep this before transformers/peft imports.
+import unsloth  # noqa: F401  # isort: skip
 import argparse
 import json
 import logging
@@ -40,9 +42,6 @@ from typing import Any
 
 import optuna
 import torch
-from optuna.pruners import HyperbandPruner
-from optuna.samplers import TPESampler
-
 from common.app_config import (
     apply_auth_environment,
     get_discord_webhooks,
@@ -50,18 +49,32 @@ from common.app_config import (
 )
 from common.discord_utils import send_discord
 from common.training_core import (
-    build_sft_config_kwargs,
-    clear_gpu_memory as core_clear_gpu_memory,
-    evaluate_model as core_evaluate_model,
-    get_line_count as core_get_line_count,
-    get_max_data_fraction as core_get_max_data_fraction,
-    load_dataset_from_jsonl as core_load_dataset_from_jsonl,
-    load_model_with_retry as core_load_model_with_retry,
     PROMPTS,
-    recommend_dataloader_num_workers,
     SYSTEM_MSG,
+    build_sft_config_kwargs,
+    recommend_dataloader_num_workers,
+)
+from common.training_core import (
+    clear_gpu_memory as core_clear_gpu_memory,
+)
+from common.training_core import (
+    evaluate_model as core_evaluate_model,
+)
+from common.training_core import (
+    get_line_count as core_get_line_count,
+)
+from common.training_core import (
+    get_max_data_fraction as core_get_max_data_fraction,
+)
+from common.training_core import (
+    load_dataset_from_jsonl as core_load_dataset_from_jsonl,
+)
+from common.training_core import (
+    load_model_with_retry as core_load_model_with_retry,
 )
 from common.wandb_utils import wandb_is_available as core_wandb_is_available
+from optuna.pruners import HyperbandPruner
+from optuna.samplers import TPESampler
 
 # Ampere GPU에서 TF32를 사용해 남은 FP32 연산(옵티마이저, 손실 계산)을 가속
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -797,10 +810,10 @@ def evaluate_model(
 
 
 def objective(trial: optuna.Trial, args) -> float:
+    from unsloth import FastVisionModel
     from transformers import TrainerCallback
     from trl.trainer.sft_config import SFTConfig
     from trl.trainer.sft_trainer import SFTTrainer
-    from unsloth import FastVisionModel
     from unsloth.trainer import UnslothVisionDataCollator
 
     trial_start = time.time()
@@ -1391,9 +1404,9 @@ def analyze_study(study: optuna.Study):
 
 
 def retrain_best(study: optuna.Study):
+    from unsloth import FastVisionModel
     from trl.trainer.sft_config import SFTConfig
     from trl.trainer.sft_trainer import SFTTrainer
-    from unsloth import FastVisionModel
     from unsloth.trainer import UnslothVisionDataCollator
 
     best = study.best_trial

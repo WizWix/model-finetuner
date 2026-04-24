@@ -25,3 +25,7 @@ dependencies = [
 [project.optional-dependencies]
 train-linux = ["unsloth[cu128-torch2100] ; platform_system == 'Linux'"]
 dev = ["pytest>=8.3", "ruff>=0.6"]
+
+[tool.ruff.lint]
+# Unsloth must patch Transformers/PEFT before they are imported.
+isort = { force-to-top = ["unsloth"] }

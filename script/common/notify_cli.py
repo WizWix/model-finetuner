@@ -52,9 +52,9 @@ def main() -> int:
 
     host = socket.gethostname()
     content = (
-        f"💥 **{args.title}**\\n"
-        f"호스트: `{host}`\\n"
-        f"exit_code: `{args.exit_code}`\\n"
+        f"💥 **{args.title}**\n"
+        f"호스트: `{host}`\n"
+        f"exit_code: `{args.exit_code}`\n"
         f"{args.message}"
     )
     send_discord(webhooks=webhooks, content=content, wait=True)

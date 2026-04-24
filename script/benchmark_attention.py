@@ -8,7 +8,7 @@ import contextlib
 import json
 import time
 from dataclasses import asdict, dataclass
-from typing import Callable
+from typing import Callable, Iterator
 
 import torch
 
@@ -72,7 +72,9 @@ def maybe_sync() -> None:
         torch.cuda.synchronize()
 
 
-def benchmark(name: str, fn: Callable[[], torch.Tensor], args: argparse.Namespace) -> BenchResult:
+def benchmark(
+    name: str, fn: Callable[[], torch.Tensor], args: argparse.Namespace
+) -> BenchResult:
     for _ in range(args.warmup_iters):
         _ = fn()
     maybe_sync()
@@ -121,15 +123,41 @@ def sdpa_context(backend: str) -> contextlib.AbstractContextManager[object]:
     # fallback for older API
     mapping = {
         "flash": dict(enable_flash=True, enable_mem_efficient=False, enable_math=False),
-        "mem_efficient": dict(enable_flash=False, enable_mem_efficient=True, enable_math=False),
+        "mem_efficient": dict(
+            enable_flash=False, enable_mem_efficient=True, enable_math=False
+        ),
         "math": dict(enable_flash=False, enable_mem_efficient=False, enable_math=True),
     }
-    return torch.backends.cuda.sdp_kernel(**mapping[backend])
+    return legacy_sdpa_context(**mapping[backend])
+
+
+@contextlib.contextmanager
+def legacy_sdpa_context(
+    *,
+    enable_flash: bool,
+    enable_mem_efficient: bool,
+    enable_math: bool,
+) -> Iterator[None]:
+    prev_flash = torch.backends.cuda.flash_sdp_enabled()
+    prev_mem_efficient = torch.backends.cuda.mem_efficient_sdp_enabled()
+    prev_math = torch.backends.cuda.math_sdp_enabled()
+    prev_cudnn = torch.backends.cuda.cudnn_sdp_enabled()
+    try:
+        torch.backends.cuda.enable_flash_sdp(enable_flash)
+        torch.backends.cuda.enable_mem_efficient_sdp(enable_mem_efficient)
+        torch.backends.cuda.enable_math_sdp(enable_math)
+        torch.backends.cuda.enable_cudnn_sdp(False)
+        yield
+    finally:
+        torch.backends.cuda.enable_flash_sdp(prev_flash)
+        torch.backends.cuda.enable_mem_efficient_sdp(prev_mem_efficient)
+        torch.backends.cuda.enable_math_sdp(prev_math)
+        torch.backends.cuda.enable_cudnn_sdp(prev_cudnn)
 
 
 def print_env() -> None:
     print(f"torch: {torch.__version__}")
-    print(f"torch.cuda: {torch.version.cuda}")
+    print(f"torch.cuda: {torch.version.cuda or 'unavailable'}")  # pyright: ignore[reportAttributeAccessIssue]
     print(f"cuda available: {torch.cuda.is_available()}")
     if torch.cuda.is_available():
         print(f"gpu: {torch.cuda.get_device_name(0)}")
@@ -155,7 +183,12 @@ def main() -> None:
     device = torch.device("cuda")
 
     q = torch.randn(
-        args.batch_size, args.heads, args.seq_len, args.head_dim, device=device, dtype=dtype
+        args.batch_size,
+        args.heads,
+        args.seq_len,
+        args.head_dim,
+        device=device,
+        dtype=dtype,
     )
     k = torch.randn_like(q)
     v = torch.randn_like(q)
@@ -182,7 +215,9 @@ def main() -> None:
 
             xformers_result = benchmark(
                 "xformers.memory_efficient_attention",
-                lambda: xops.memory_efficient_attention(q_x, k_x, v_x, attn_bias=attn_bias),
+                lambda: xops.memory_efficient_attention(
+                    q_x, k_x, v_x, attn_bias=attn_bias
+                ),
                 args,
             )
             results.append(xformers_result)
