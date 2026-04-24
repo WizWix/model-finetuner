@@ -25,7 +25,6 @@ Optuna + Unsloth + SFTTrainer + W&B + Discord 알림
 """
 
 import argparse
-import inspect
 import json
 import logging
 import math
@@ -51,26 +50,16 @@ from common.app_config import (
 )
 from common.discord_utils import send_discord
 from common.training_core import (
-    PROMPTS,
-    SYSTEM_MSG,
-)
-from common.training_core import (
+    build_sft_config_kwargs,
     clear_gpu_memory as core_clear_gpu_memory,
-)
-from common.training_core import (
     evaluate_model as core_evaluate_model,
-)
-from common.training_core import (
     get_line_count as core_get_line_count,
-)
-from common.training_core import (
     get_max_data_fraction as core_get_max_data_fraction,
-)
-from common.training_core import (
     load_dataset_from_jsonl as core_load_dataset_from_jsonl,
-)
-from common.training_core import (
     load_model_with_retry as core_load_model_with_retry,
+    PROMPTS,
+    recommend_dataloader_num_workers,
+    SYSTEM_MSG,
 )
 from common.wandb_utils import wandb_is_available as core_wandb_is_available
 
@@ -96,6 +85,8 @@ LOG_FILE = os.environ.get("HP_LOG_FILE", f"{VOLUME_DIR}/hp_search.log")
 PRELOAD_CACHE_DIR = os.environ.get(
     "HP_PRELOAD_CACHE_DIR", f"{VOLUME_DIR}/preload_cache"
 )
+_env_dl_workers = os.environ.get("HP_DATALOADER_NUM_WORKERS")
+DATALOADER_NUM_WORKERS = int(_env_dl_workers) if _env_dl_workers is not None else None
 
 STUDY_NAME = "pest-detection-hpsearch"
 BASE_MODEL = "unsloth/Qwen3.5-9B"
@@ -139,6 +130,7 @@ def initialize_from_config(config_path: str) -> dict:
     global LOG_FILE, PRELOAD_CACHE_DIR, STUDY_NAME, BASE_MODEL, RANDOM_SEED
     global N_TRIALS_DEFAULT, WANDB_PROJECT, WANDB_ENTITY, GITHUB_REPO
     global GITHUB_TOKEN, DISCORD_WEBHOOKS, GITHUB_DB_BACKUP_PATH
+    global DATALOADER_NUM_WORKERS
 
     cfg = load_app_config(config_path)
     apply_auth_environment(cfg)
@@ -162,6 +154,9 @@ def initialize_from_config(config_path: str) -> dict:
     N_TRIALS_DEFAULT = int(runtime.get("default_n_trials", N_TRIALS_DEFAULT))
     WANDB_PROJECT = runtime.get("wandb_project", WANDB_PROJECT)
     WANDB_ENTITY = runtime.get("wandb_entity", WANDB_ENTITY)
+    DATALOADER_NUM_WORKERS = runtime.get(
+        "dataloader_num_workers", DATALOADER_NUM_WORKERS
+    )
 
     GITHUB_REPO = github.get("repo", GITHUB_REPO)
     GITHUB_DB_BACKUP_PATH = github.get("backup_db_path_in_repo", GITHUB_DB_BACKUP_PATH)
@@ -202,21 +197,6 @@ OBJECTIVE_METRIC = "eval_loss"
 
 # 볼륨이 없을 때 import 단계에서 크래시하지 않도록 로거는 main()에서 설정
 logger = logging.getLogger(__name__)
-
-
-def apply_sft_seq_len_kwarg(
-    sft_config_kwargs: dict[str, Any], sft_config_cls: type, seq_len: int
-) -> None:
-    """trl 버전에 따라 SFTConfig 길이 인자명을 맞춘다."""
-    sft_init_params = inspect.signature(sft_config_cls.__init__).parameters
-    if "max_seq_length" in sft_init_params:
-        sft_config_kwargs["max_seq_length"] = seq_len
-    elif "max_length" in sft_init_params:
-        sft_config_kwargs["max_length"] = seq_len
-    else:
-        logger.warning(
-            "SFTConfig에서 max length 인자(max_seq_length/max_length)를 찾지 못했습니다."
-        )
 
 
 class TrialExecutionError(Exception):
@@ -1040,8 +1020,13 @@ def objective(trial: optuna.Trial, args) -> float:
         # ─── 학습 ─────────────────────────────────────────────────────
 
         report_to = "wandb" if wandb_is_available() else "none"
+        dataloader_num_workers = recommend_dataloader_num_workers(
+            configured=DATALOADER_NUM_WORKERS,
+            logger=logger,
+        )
+        dataloader_persistent_workers = dataloader_num_workers > 0
 
-        sft_config_kwargs: dict[str, Any] = {
+        sft_config_base_kwargs: dict[str, Any] = {
             "per_device_train_batch_size": batch_size,
             "gradient_accumulation_steps": grad_accum,
             "warmup_steps": warmup,
@@ -1059,8 +1044,6 @@ def objective(trial: optuna.Trial, args) -> float:
             "weight_decay": wd,
             "lr_scheduler_type": scheduler,
             "max_grad_norm": 1.0,
-            "dataloader_num_workers": 0,
-            "dataloader_pin_memory": True,
             "bf16_full_eval": True,
             "seed": RANDOM_SEED,
             "output_dir": trial_dir,
@@ -1069,7 +1052,21 @@ def objective(trial: optuna.Trial, args) -> float:
             "dataset_text_field": "",
             "dataset_kwargs": {"skip_prepare_dataset": True},
         }
-        apply_sft_seq_len_kwarg(sft_config_kwargs, SFTConfig, max_seq)
+        sft_config_kwargs = build_sft_config_kwargs(
+            base_kwargs=sft_config_base_kwargs,
+            sft_config_cls=SFTConfig,
+            seq_len=max_seq,
+            dataloader_num_workers=dataloader_num_workers,
+            dataloader_pin_memory=True,
+            dataloader_persistent_workers=dataloader_persistent_workers,
+            logger=logger,
+        )
+        logger.info(
+            "트라이얼 %d DataLoader 설정: workers=%d, persistent=%s",
+            trial.number,
+            dataloader_num_workers,
+            dataloader_persistent_workers,
+        )
         trainer_kwargs: dict[str, Any] = {
             "model": model,
             "tokenizer": tokenizer,
@@ -1449,7 +1446,8 @@ def retrain_best(study: optuna.Study):
         )
         FastVisionModel.for_training(model)
 
-        if wandb_is_available():
+        wandb_available = wandb_is_available()
+        if wandb_available:
             import wandb
 
             wandb_run = wandb.init(
@@ -1462,9 +1460,14 @@ def retrain_best(study: optuna.Study):
                 tags=["retrain", "best-model"],
             )
 
-        report_to = "wandb" if wandb_is_available() else "none"
+        report_to = "wandb" if wandb_available else "none"
+        dataloader_num_workers = recommend_dataloader_num_workers(
+            configured=DATALOADER_NUM_WORKERS,
+            logger=logger,
+        )
+        dataloader_persistent_workers = dataloader_num_workers > 0
 
-        retrain_sft_config_kwargs: dict[str, Any] = {
+        retrain_sft_config_base_kwargs: dict[str, Any] = {
             "per_device_train_batch_size": p["batch_size"],
             "gradient_accumulation_steps": p["grad_accum"],
             "warmup_steps": p["warmup_steps"],
@@ -1478,8 +1481,6 @@ def retrain_best(study: optuna.Study):
             "weight_decay": p["weight_decay"],
             "lr_scheduler_type": p["lr_scheduler"],
             "max_grad_norm": 1.0,
-            "dataloader_num_workers": 0,
-            "dataloader_pin_memory": True,
             "bf16_full_eval": True,
             "seed": RANDOM_SEED,
             "output_dir": BEST_MODEL_DIR,
@@ -1490,8 +1491,19 @@ def retrain_best(study: optuna.Study):
             "load_best_model_at_end": True,
             "metric_for_best_model": "eval_loss",
         }
-        apply_sft_seq_len_kwarg(
-            retrain_sft_config_kwargs, SFTConfig, p["max_seq_length"]
+        retrain_sft_config_kwargs = build_sft_config_kwargs(
+            base_kwargs=retrain_sft_config_base_kwargs,
+            sft_config_cls=SFTConfig,
+            seq_len=p["max_seq_length"],
+            dataloader_num_workers=dataloader_num_workers,
+            dataloader_pin_memory=True,
+            dataloader_persistent_workers=dataloader_persistent_workers,
+            logger=logger,
+        )
+        logger.info(
+            "재학습 DataLoader 설정: workers=%d, persistent=%s",
+            dataloader_num_workers,
+            dataloader_persistent_workers,
         )
         retrain_trainer_kwargs: dict[str, Any] = {
             "model": model,

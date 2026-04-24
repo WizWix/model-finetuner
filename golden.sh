@@ -12,16 +12,16 @@ assert_safe_dir() {
   local path="$1"
   local name="$2"
   case "$path" in
-    ""|"/"|".")
-      echo "오류: 위험한 $name 경로입니다: '$path'"
-      exit 1
-      ;;
+  "" | "/" | ".")
+    echo "오류: 위험한 $name 경로입니다: '$path'"
+    exit 1
+    ;;
   esac
 }
 
 if [ -f "$CONFIG_PATH" ]; then
   CFG_PATHS=$(
-    python3 - "$CONFIG_PATH" << 'PY'
+    python3 - "$CONFIG_PATH" <<'PY'
 import json, sys
 path = sys.argv[1]
 with open(path, encoding='utf-8') as f:
@@ -53,10 +53,10 @@ echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] 감시 시작: $WATCH_DIR 모니터링" |
 
 while true; do
   latest_ckpt=$(
-    find "$WATCH_DIR" -maxdepth 1 -type d -name 'checkpoint-*' -printf '%T@ %p\n' 2> /dev/null \
-      | sort -nr \
-      | head -1 \
-      | cut -d' ' -f2-
+    find "$WATCH_DIR" -maxdepth 1 -type d -name 'checkpoint-*' -printf '%T@ %p\n' 2>/dev/null |
+      sort -nr |
+      head -1 |
+      cut -d' ' -f2-
   )
   if [ -z "$latest_ckpt" ] || [ ! -f "$latest_ckpt/trainer_state.json" ]; then
     sleep "$POLL_INTERVAL"
@@ -70,14 +70,14 @@ try:
     print(d.get('best_model_checkpoint') or '')
 except Exception:
     sys.exit(0)
-" 2> /dev/null)
+" 2>/dev/null)
 
   if [ -z "$best_path" ] || [ ! -d "$best_path" ]; then
     sleep "$POLL_INTERVAL"
     continue
   fi
 
-  last_copied=$(cat "$SRC_MARKER" 2> /dev/null || echo "")
+  last_copied=$(cat "$SRC_MARKER" 2>/dev/null || echo "")
   if [ "$best_path" != "$last_copied" ]; then
     ts=$(date -u +%H:%M:%S)
     loss=$(python3 -c "
@@ -87,13 +87,13 @@ try:
     print(f\"{d.get('best_metric', float('nan')):.6f}\")
 except Exception:
     print('?')
-" 2> /dev/null)
+" 2>/dev/null)
     echo "[$ts] 새 최고 성능: $(basename "$best_path") (eval_loss=$loss)" | tee -a "$LOG"
     rm -rf -- "$BEST_TMP"
     cp -r -- "$best_path" "$BEST_TMP"
     rm -rf -- "$BEST_DST"
     mv -- "$BEST_TMP" "$BEST_DST"
-    echo "$best_path" > "$SRC_MARKER"
+    echo "$best_path" >"$SRC_MARKER"
   fi
 
   sleep "$POLL_INTERVAL"

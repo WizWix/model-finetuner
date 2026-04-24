@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import gc
+import inspect
 import json
 import logging
 import os
 import pickle
 import random
 import time
+from collections import Counter
 from collections.abc import Iterable
 from typing import Any, Literal, overload
 
@@ -45,6 +47,77 @@ def get_line_count(path: str) -> int:
         with open(path, "r", encoding="utf-8") as f:
             _line_count_cache[path] = sum(1 for _ in f)
     return _line_count_cache[path]
+
+
+def recommend_dataloader_num_workers(
+    *,
+    configured: int | None = None,
+    reserve_cores: int = 2,
+    max_workers: int = 8,
+    logger: logging.Logger | None = None,
+) -> int:
+    """CPU 코어 수를 기반으로 DataLoader worker 수를 추천한다."""
+    log = _get_logger(logger)
+    if configured is not None:
+        return max(0, int(configured))
+
+    cpu_count = os.cpu_count() or 4
+    workers = max(1, cpu_count - reserve_cores)
+    workers = min(max_workers, workers)
+    log.info(
+        "DataLoader workers 자동 설정: %d (cpu=%d, reserve=%d, cap=%d)",
+        workers,
+        cpu_count,
+        reserve_cores,
+        max_workers,
+    )
+    return workers
+
+
+def build_sft_config_kwargs(
+    *,
+    base_kwargs: dict[str, Any],
+    sft_config_cls: type,
+    seq_len: int | None = None,
+    save_only_model: bool | None = None,
+    dataloader_num_workers: int | None = None,
+    dataloader_pin_memory: bool | None = None,
+    dataloader_persistent_workers: bool | None = None,
+    logger: logging.Logger | None = None,
+) -> dict[str, Any]:
+    """trl 버전 호환성을 고려해 SFTConfig kwargs를 구성한다."""
+    log = _get_logger(logger)
+    sft_kwargs = dict(base_kwargs)
+    sft_init_params = inspect.signature(sft_config_cls.__init__).parameters
+
+    if seq_len is not None:
+        if "max_seq_length" in sft_init_params:
+            sft_kwargs["max_seq_length"] = seq_len
+        elif "max_length" in sft_init_params:
+            sft_kwargs["max_length"] = seq_len
+        else:
+            log.warning(
+                "SFTConfig에서 max length 인자(max_seq_length/max_length)를 찾지 못했습니다."
+            )
+
+    if save_only_model is not None:
+        if "save_only_model" in sft_init_params:
+            sft_kwargs["save_only_model"] = save_only_model
+        else:
+            log.warning(
+                "SFTConfig에서 save_only_model 인자를 지원하지 않습니다. "
+                "옵티마이저 상태 체크포인트가 저장될 수 있습니다."
+            )
+
+    optional_kwargs = {
+        "dataloader_num_workers": dataloader_num_workers,
+        "dataloader_pin_memory": dataloader_pin_memory,
+        "dataloader_persistent_workers": dataloader_persistent_workers,
+    }
+    for key, value in optional_kwargs.items():
+        if value is not None and key in sft_init_params:
+            sft_kwargs[key] = value
+    return sft_kwargs
 
 
 def resolve_split_name(data_dir: str, split: str) -> str:
@@ -136,6 +209,74 @@ def find_label_json(
     return None
 
 
+def _extract_label_and_image_path(
+    record: dict[str, Any],
+) -> tuple[str, str] | None:
+    messages = record.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return None
+    try:
+        label = messages[-1]["content"][0]["text"]
+    except (KeyError, IndexError, TypeError):
+        return None
+    if not isinstance(label, str):
+        return None
+
+    img_rel_path: str | None = None
+    for msg in messages:
+        for content in msg.get("content", []):
+            if content.get("type") == "image" and "image" in content:
+                img_rel_path = content["image"]
+                break
+        if img_rel_path is not None:
+            break
+    if not img_rel_path:
+        return None
+    return label, str(img_rel_path).replace("\\", "/")
+
+
+def _build_subset_indices(
+    *,
+    total_lines: int,
+    fraction: float,
+    random_seed: int,
+) -> set[int] | None:
+    if fraction >= 1.0:
+        return None
+    sample_count = int(total_lines * fraction)
+    rng = random.Random(random_seed)
+    return set(rng.sample(range(total_lines), sample_count))
+
+
+def _iter_jsonl_samples(
+    *,
+    data_dir: str,
+    resolved_split: str,
+    keep: set[int] | None,
+):
+    jsonl_path = os.path.join(data_dir, f"{resolved_split}.jsonl")
+    with open(jsonl_path, "r", encoding="utf-8") as f:
+        for i, line in enumerate(f):
+            if keep is not None and i not in keep:
+                continue
+            try:
+                record = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            extracted = _extract_label_and_image_path(record)
+            if extracted is None:
+                continue
+            label, img_rel_path = extracted
+            parts = img_rel_path.split("/")
+            if len(parts) < 3:
+                continue
+            img_path = os.path.join(data_dir, img_rel_path)
+            if not os.path.exists(img_path):
+                continue
+            class_name, img_filename = parts[1], parts[2]
+            yield label, img_path, class_name, img_filename
+
+
 def make_conversation(
     image: Image.Image,
     label: str,
@@ -195,11 +336,10 @@ def _preload_samples(
 
     jsonl_path = os.path.join(data_dir, f"{resolved_split}.jsonl")
     total_lines = get_line_count(jsonl_path)
-    rng = random.Random(random_seed)
-    keep = (
-        set(rng.sample(range(total_lines), int(total_lines * fraction)))
-        if fraction < 1.0
-        else None
+    keep = _build_subset_indices(
+        total_lines=total_lines,
+        fraction=fraction,
+        random_seed=random_seed,
     )
     expected = len(keep) if keep is not None else total_lines
     log.info(
@@ -208,56 +348,35 @@ def _preload_samples(
 
     samples: list[dict[str, Any]] = []
     started = time.time()
-    with open(jsonl_path, "r", encoding="utf-8") as f:
-        for i, line in enumerate(f):
-            if keep is not None and i not in keep:
-                continue
-            record = json.loads(line)
-            messages = record["messages"]
-            label = messages[-1]["content"][0]["text"]
-            img_rel_path = None
-            for msg in messages:
-                for content in msg["content"]:
-                    if content.get("type") == "image" and "image" in content:
-                        img_rel_path = content["image"]
-                        break
-            if img_rel_path is None:
-                continue
-            img_rel_path = img_rel_path.replace("\\", "/")
-            parts = img_rel_path.split("/")
-            if len(parts) < 3:
-                continue
-            img_path = os.path.join(data_dir, img_rel_path)
-            if not os.path.exists(img_path):
-                continue
+    for label, img_path, class_name, img_filename in _iter_jsonl_samples(
+        data_dir=data_dir,
+        resolved_split=resolved_split,
+        keep=keep,
+    ):
+        with Image.open(img_path) as opened_img:
+            base_img = opened_img.convert("RGB")
+        full_img = cap_image_size(base_img.copy(), max_image_dim)
 
-            class_name, img_filename = parts[1], parts[2]
-            full_img = cap_image_size(
-                Image.open(img_path).convert("RGB"), max_image_dim
+        tight_img = None
+        if label != "정상":
+            bbox = find_label_json(data_dir, resolved_split, class_name, img_filename)
+            if bbox:
+                tight_img = cap_image_size(
+                    crop_to_bbox(base_img.copy(), bbox, padding_ratio=0.0),
+                    max_image_dim,
+                )
+        base_img.close()
+
+        samples.append({"label": label, "full": full_img, "tight": tight_img})
+        if len(samples) % 1000 == 0:
+            elapsed = time.time() - started
+            log.info(
+                "  preload 진행: %d/%d (%.0fs, %.1f img/s)",
+                len(samples),
+                expected,
+                elapsed,
+                len(samples) / max(elapsed, 1e-3),
             )
-
-            tight_img = None
-            if label != "정상":
-                bbox = find_label_json(
-                    data_dir, resolved_split, class_name, img_filename
-                )
-                if bbox:
-                    orig = Image.open(img_path).convert("RGB")
-                    tight_img = cap_image_size(
-                        crop_to_bbox(orig, bbox, padding_ratio=0.0), max_image_dim
-                    )
-                    orig.close()
-
-            samples.append({"label": label, "full": full_img, "tight": tight_img})
-            if len(samples) % 1000 == 0:
-                elapsed = time.time() - started
-                log.info(
-                    "  preload 진행: %d/%d (%.0fs, %.1f img/s)",
-                    len(samples),
-                    expected,
-                    elapsed,
-                    len(samples) / max(elapsed, 1e-3),
-                )
 
     _preloaded_samples[cache_key] = samples
     if cache_file:
@@ -302,44 +421,24 @@ class LazyImageDataset:
             self.logger.info("split 매핑 적용: %s -> %s", split, resolved_split)
         jsonl_path = os.path.join(self.data_dir, f"{resolved_split}.jsonl")
         total_lines = get_line_count(jsonl_path)
-        rng = random.Random(self.random_seed)
-        keep = (
-            set(rng.sample(range(total_lines), int(total_lines * fraction)))
-            if fraction < 1.0
-            else None
+        keep = _build_subset_indices(
+            total_lines=total_lines,
+            fraction=fraction,
+            random_seed=self.random_seed,
         )
 
         out: list[dict[str, Any]] = []
-        with open(jsonl_path, "r", encoding="utf-8") as f:
-            for i, line in enumerate(f):
-                if keep is not None and i not in keep:
-                    continue
-                record = json.loads(line)
-                messages = record["messages"]
-                label = messages[-1]["content"][0]["text"]
-
-                img_rel = None
-                for msg in messages:
-                    for content in msg["content"]:
-                        if content.get("type") == "image" and "image" in content:
-                            img_rel = content["image"]
-                            break
-                if img_rel is None:
-                    continue
-                img_rel = img_rel.replace("\\", "/")
-                parts = img_rel.split("/")
-                if len(parts) < 3:
-                    continue
-                img_path = os.path.join(self.data_dir, img_rel)
-                if not os.path.exists(img_path):
-                    continue
-                class_name, img_filename = parts[1], parts[2]
-                bbox = None
-                if label != "정상":
-                    bbox = find_label_json(
-                        self.data_dir, resolved_split, class_name, img_filename
-                    )
-                out.append({"label": label, "img_path": img_path, "bbox": bbox})
+        for label, img_path, class_name, img_filename in _iter_jsonl_samples(
+            data_dir=self.data_dir,
+            resolved_split=resolved_split,
+            keep=keep,
+        ):
+            bbox = None
+            if label != "정상":
+                bbox = find_label_json(
+                    self.data_dir, resolved_split, class_name, img_filename
+                )
+            out.append({"label": label, "img_path": img_path, "bbox": bbox})
         return out
 
     def __len__(self) -> int:
@@ -680,13 +779,14 @@ def evaluate_model(
     prec_per_list = _as_float_list(prec_per, len(all_labels))
     rec_per_list = _as_float_list(rec_per, len(all_labels))
     f1_per_list = _as_float_list(f1_per, len(all_labels))
+    label_support = Counter(y_true)
     per_class: dict[str, dict[str, float | int]] = {}
     for i, cls in enumerate(all_labels):
         per_class[cls] = {
             "precision": prec_per_list[i],
             "recall": rec_per_list[i],
             "f1": f1_per_list[i],
-            "support": int(y_true.count(cls)),
+            "support": int(label_support.get(cls, 0)),
         }
 
     cm = confusion_matrix(y_true, y_pred, labels=all_labels)

@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import inspect
 import json
 import logging
 import os
@@ -24,12 +23,14 @@ from common.app_config import (
 )
 from common.discord_utils import send_discord
 from common.training_core import (
+    build_sft_config_kwargs,
     clear_gpu_memory,
     evaluate_model,
     get_line_count,
     get_max_data_fraction,
     load_dataset_from_jsonl,
     load_model_with_retry,
+    recommend_dataloader_num_workers,
 )
 from common.wandb_utils import wandb_is_available
 
@@ -178,9 +179,16 @@ def main() -> int:
     wandb_entity = runtime.get("wandb_entity", "")
     save_only_model_default = bool(runtime.get("predefined_save_only_model", True))
     save_only_model = (
-        save_only_model_default if args.save_only_model is None else args.save_only_model
+        save_only_model_default
+        if args.save_only_model is None
+        else args.save_only_model
     )
     min_free_space_gb = float(runtime.get("predefined_min_free_space_gb", 8))
+    dataloader_num_workers = recommend_dataloader_num_workers(
+        configured=runtime.get("dataloader_num_workers"),
+        logger=logger,
+    )
+    dataloader_persistent_workers = dataloader_num_workers > 0
 
     logging.basicConfig(
         level=logging.INFO,
@@ -309,7 +317,7 @@ def main() -> int:
 
     eval_steps = args.save_steps if args.eval_steps == 0 else args.eval_steps
 
-    sft_config_kwargs: dict[str, Any] = {
+    sft_config_base_kwargs: dict[str, Any] = {
         "per_device_train_batch_size": hp["per_device_train_batch_size"],
         "gradient_accumulation_steps": hp["gradient_accumulation_steps"],
         "per_device_eval_batch_size": 2,
@@ -327,8 +335,6 @@ def main() -> int:
         "bf16_full_eval": True,
         "fp16": False,
         "gradient_checkpointing": True,
-        "dataloader_num_workers": 0,
-        "dataloader_pin_memory": True,
         "save_strategy": "steps",
         "save_steps": args.save_steps,
         "save_total_limit": 3,
@@ -348,22 +354,16 @@ def main() -> int:
         "dataset_text_field": "",
         "dataset_kwargs": {"skip_prepare_dataset": True},
     }
-    sft_init_params = inspect.signature(SFTConfig.__init__).parameters
-    if "save_only_model" in sft_init_params:
-        sft_config_kwargs["save_only_model"] = save_only_model
-    else:
-        logger.warning(
-            "SFTConfig에서 save_only_model 인자를 지원하지 않습니다. "
-            "옵티마이저 상태 체크포인트가 저장될 수 있습니다."
-        )
-    if "max_seq_length" in sft_init_params:
-        sft_config_kwargs["max_seq_length"] = hp["max_seq_length"]
-    elif "max_length" in sft_init_params:
-        sft_config_kwargs["max_length"] = hp["max_seq_length"]
-    else:
-        logger.warning(
-            "SFTConfig에서 max length 인자(max_seq_length/max_length)를 찾지 못했습니다."
-        )
+    sft_config_kwargs = build_sft_config_kwargs(
+        base_kwargs=sft_config_base_kwargs,
+        sft_config_cls=SFTConfig,
+        seq_len=hp["max_seq_length"],
+        save_only_model=save_only_model,
+        dataloader_num_workers=dataloader_num_workers,
+        dataloader_pin_memory=True,
+        dataloader_persistent_workers=dataloader_persistent_workers,
+        logger=logger,
+    )
     sft_args = SFTConfig(**sft_config_kwargs)
 
     trainer_kwargs: dict[str, Any] = {
@@ -383,7 +383,7 @@ def main() -> int:
                     "author": {"name": "AI 모델 파인튜너"},
                     "color": 3066993,
                     "title": "🧱 모델/트레이너 준비 완료",
-                    "description": f"- 모델: {base_model}\n- 출력 경로: {output_dir}\n- save/eval/logging steps: {args.save_steps}/{eval_steps}/{args.logging_steps}\n- save_only_model: {save_only_model}",
+                    "description": f"- 모델: {base_model}\n- 출력 경로: {output_dir}\n- save/eval/logging steps: {args.save_steps}/{eval_steps}/{args.logging_steps}\n- save_only_model: {save_only_model}\n- dataloader_num_workers: {dataloader_num_workers}\n- dataloader_persistent_workers: {dataloader_persistent_workers}",
                 }
             ]
         },

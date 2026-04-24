@@ -8,9 +8,9 @@ N_TRIALS="${N_TRIALS:-}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-HP_PY="$SCRIPT_DIR/hp_search.py"
+HP_PY="$SCRIPT_DIR/script/hp_search.py"
 PY_RUN="python3"
-if command -v uv > /dev/null 2>&1 && [ -f "$SCRIPT_DIR/pyproject.toml" ]; then
+if command -v uv >/dev/null 2>&1 && [ -f "$SCRIPT_DIR/pyproject.toml" ]; then
   PY_RUN="uv run --no-sync python"
 fi
 
@@ -19,7 +19,7 @@ if [ ! -f "$HP_PY" ]; then
   exit 1
 fi
 
-if tmux has-session -t "$SESSION" 2> /dev/null; then
+if tmux has-session -t "$SESSION" 2>/dev/null; then
   echo "tmux 세션 '$SESSION'이 이미 존재합니다."
   exit 1
 fi
@@ -36,7 +36,7 @@ tmux new-session -d -s "$SESSION" bash -c "
   $PY_RUN -u '$HP_PY' --config '$CONFIG_PATH' $TRIAL_ARG $EXTRA_ARGS 2>&1 | tee '$LOG'
   EXIT=\${PIPESTATUS[0]}
   if [ \$EXIT -ne 0 ]; then
-    $PY_RUN '$SCRIPT_DIR/common/notify_cli.py' --config '$CONFIG_PATH' --title 'HP 탐색 실패' --exit-code \$EXIT --message 'hp_search.py 실행이 비정상 종료되었습니다.' || true
+    $PY_RUN '$SCRIPT_DIR/script/common/notify_cli.py' --config '$CONFIG_PATH' --title 'HP 탐색 실패' --exit-code \$EXIT --message 'hp_search.py 실행이 비정상 종료되었습니다.' || true
   fi
   exec bash
 "
