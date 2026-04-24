@@ -15,7 +15,7 @@ dependencies = [
   "requests>=2.32",
   "scikit-learn>=1.4",
   "seaborn>=0.13",
-  "torch>=2.8,<2.9",
+  "torch>=2.9,<2.10",
   "transformers>=5.2,<6.0",
   "trl==0.22.2",
   "unsloth>=2026.4.4",
@@ -23,5 +23,5 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-train-linux = ["unsloth[cu128-torch280] ; platform_system == 'Linux'"]
+train-linux = ["unsloth[cu128-torch291] ; platform_system == 'Linux'"]
 dev = ["pytest>=8.3", "ruff>=0.6"]
