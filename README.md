@@ -21,28 +21,44 @@ VLM 학습 파이프라인입니다.
 
 ### `paths`
 
-- `data_dir`: 데이터셋 다운로드/학습용 JSONL 및 이미지 경로
-- `volume_dir`: 공용 볼륨 루트
-- `output_dir`: HP 탐색 결과물(트라이얼 아웃풋/분석 파일)
 - `best_model_dir`: HP 탐색 후 retrain 결과 저장 경로
+- `data_dir`: 데이터셋 다운로드/학습용 JSONL 및 이미지 경로
 - `db_path`: Optuna SQLite DB 파일 위치
-- `log_file`: HP 탐색 로그 파일
-- `preload_cache_dir`: 이미지 preload 캐시 경로
 - `final_output_dir`: 고정 HP 파인튜닝 결과 저장 경로
 - `golden_dir`: `golden.sh` 백업 사이드카 출력 경로
+- `log_file`: HP 탐색 로그 파일
+- `output_dir`: HP 탐색 결과물(트라이얼 아웃풋/분석 파일)
+- `preload_cache_dir`: 이미지 preload 캐시 경로
+- `volume_dir`: 공용 볼륨 루트
 
 ### `runtime`
 
-- `study_name`: Optuna study 이름
+- `anomaly_eval_loss_jump_ratio`: 직전 대비 `eval_loss` 급등 배수 기반 이상 탐지
+- `anomaly_eval_loss_threshold`: 절대 임계치 기반 `eval_loss` 이상 탐지
+- `anomaly_grad_norm_threshold`: 절대 임계치 기반 `grad_norm` 이상 탐지
+- `anomaly_loss_jump_ratio`: 직전 대비 `train_loss` 급등 배수 기반 이상 탐지
+- `anomaly_loss_threshold`: 절대 임계치 기반 `train_loss` 이상 탐지
+- `auto_stop_enabled`: 자동 중단 기능 on/off
+- `auto_stop_eval_loss_best_ratio`: best 대비 `eval_loss` 악화 비율 자동 중단 조건
+- `auto_stop_eval_loss_threshold`: 절대 `eval_loss` 임계치 자동 중단 조건
+- `auto_stop_grad_norm_threshold`: `grad_norm` 자동 중단 임계치(단, `train_loss>=0.5` 조건과 함께 사용)
+- `auto_stop_train_loss_consecutive`: `train_loss` 연속 급등 자동 중단 최소 횟수
+- `auto_stop_train_loss_threshold`: `train_loss` 자동 중단 임계치
 - `base_model`: 베이스 모델 ID
-- `random_seed`: 전체 시드
+- `dataloader_num_workers`: DataLoader worker 수(미지정 시 자동 추천)
 - `default_n_trials`: HP 탐색 기본 trial 수
-- `wandb_project`, `wandb_entity`: W&B 런 식별 정보
-- `predefined_save_steps`: 고정 파인튜닝 체크포인트 저장 주기 기본값
+- `discord_alert_cooldown_steps`: 이상 징후 Discord 알림 최소 간격(step)
+- `discord_heartbeat_steps`: 학습 중 상태 Discord 알림 주기(step)
 - `predefined_eval_steps`: 고정 파인튜닝 평가 주기 기본값
 - `predefined_logging_steps`: 고정 파인튜닝 로그/W&B 기록 주기 기본값
-- `predefined_save_only_model`: 고정 파인튜닝 체크포인트에서 옵티마이저/스케줄러 저장 생략 여부(기본 `true`)
 - `predefined_min_free_space_gb`: 경고를 띄울 최소 디스크 여유 공간(GB)
+- `predefined_save_only_model`: 고정 파인튜닝 체크포인트에서 옵티마이저/스케줄러 저장 생략 여부(기본 `true`)
+- `predefined_save_steps`: 고정 파인튜닝 체크포인트 저장 주기 기본값
+- `predefined_save_total_limit`: 고정 파인튜닝에서 유지할 체크포인트 최대 개수
+- `random_seed`: 전체 시드
+- `study_name`: Optuna study 이름
+- `wandb_entity`: W&B entity(팀/사용자) 식별자
+- `wandb_project`: W&B project 식별자
 
 ### `notifications`
 
@@ -60,14 +76,14 @@ VLM 학습 파이프라인입니다.
 
 ### `github`
 
-- `repo`: Optuna DB 백업/릴리즈용 GitHub repo
 - `backup_db_path_in_repo`: repo 내 DB 업로드 경로
+- `repo`: Optuna DB 백업/릴리즈용 GitHub repo
 
 ### `auth`
 
+- `github_token`: GitHub 토큰
 - `hf_token`: Hugging Face 토큰
 - `wandb_api_key`: W&B API 키
-- `github_token`: GitHub 토큰
 
 ### `huggingface`
 
@@ -129,7 +145,7 @@ LoRA/optimizer/batch/sequence/seed 관련 값이 여기에 모여 있습니다.
 
 `finetune.sh` 기본값은 `config.runtime.predefined_*`를 우선 사용합니다.
 환경변수(`SAVE_STEPS`, `EVAL_STEPS`, `LOGGING_STEPS`)를 주면 config 값보다 우선합니다.
-`golden.sh` 사이드카는 기본 비활성화(`DISABLE_GOLDEN_WATCH=1`)이며, 활성화하려면 `DISABLE_GOLDEN_WATCH=0`으로 실행합니다.
+`golden.sh` 사이드카는 기본 활성화(`DISABLE_GOLDEN_WATCH=0`)입니다. 비활성화하려면 `DISABLE_GOLDEN_WATCH=1`로 실행합니다.
 
 값을 작게 하면(예: 10) 그래프 포인트(꼭지점)가 많아지고 추세를 세밀하게 볼 수 있지만, 로깅/평가/저장 오버헤드가 증가합니다.
 값을 크게 하면(예: 50) 포인트는 적어지지만 학습 자체 오버헤드는 줄어듭니다.
@@ -159,6 +175,10 @@ LoRA/optimizer/batch/sequence/seed 관련 값이 여기에 모여 있습니다.
 - 고정 HP 파인튜닝 LoRA: `config.paths.final_output_dir/lora`
 - 고정 HP 평가 결과: `config.paths.final_output_dir/evaluation`
 - 골든 백업: `config.paths.golden_dir/best_ckpt`
+
+## 운영 문서
+
+- 학습 중단/종료 후 golden snapshot을 PEFT Adapter로 Hub에 업로드: `DOCS.md`
 
 ## 의존성 관리 정책 (Windows + Runpod)
 

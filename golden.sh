@@ -7,6 +7,8 @@ CONFIG_PATH="${CONFIG_PATH:-$SCRIPT_DIR/config.json}"
 WATCH_DIR="${WATCH_DIR:-/workspace/best-pest-detector}"
 GOLDEN="${GOLDEN_DIR:-/workspace/_golden}"
 POLL_INTERVAL="${POLL_INTERVAL:-30}"
+MIN_IMPROVEMENT="${MIN_IMPROVEMENT:-0}"
+MIN_COPY_INTERVAL_SEC="${MIN_COPY_INTERVAL_SEC:-0}"
 
 assert_safe_dir() {
   local path="$1"
@@ -43,6 +45,8 @@ assert_safe_dir "$GOLDEN" "GOLDEN_DIR"
 mkdir -p "$GOLDEN"
 LOG="$GOLDEN/watcher.log"
 SRC_MARKER="$GOLDEN/best_source.txt"
+METRIC_MARKER="$GOLDEN/best_metric.txt"
+TS_MARKER="$GOLDEN/last_copy_ts.txt"
 BEST_TMP="$GOLDEN/best_ckpt.tmp"
 BEST_DST="$GOLDEN/best_ckpt"
 
@@ -88,12 +92,58 @@ try:
 except Exception:
     print('?')
 " 2>/dev/null)
-    echo "[$ts] 새 최고 성능: $(basename "$best_path") (eval_loss=$loss)" | tee -a "$LOG"
-    rm -rf -- "$BEST_TMP"
-    cp -r -- "$best_path" "$BEST_TMP"
-    rm -rf -- "$BEST_DST"
-    mv -- "$BEST_TMP" "$BEST_DST"
-    echo "$best_path" >"$SRC_MARKER"
+    should_copy=$(
+      python3 - "$loss" "$MIN_IMPROVEMENT" "$MIN_COPY_INTERVAL_SEC" "$METRIC_MARKER" "$TS_MARKER" <<'PY'
+import math, os, sys, time
+
+loss_s, min_imp_s, min_int_s, metric_path, ts_path = sys.argv[1:]
+try:
+    loss = float(loss_s)
+except ValueError:
+    loss = math.nan
+min_imp = float(min_imp_s)
+min_int = int(float(min_int_s))
+
+if not os.path.exists(metric_path) or not os.path.exists(ts_path):
+    print("1")
+    sys.exit(0)
+
+try:
+    prev_metric = float(open(metric_path, encoding="utf-8").read().strip())
+except Exception:
+    prev_metric = math.nan
+
+try:
+    prev_ts = int(float(open(ts_path, encoding="utf-8").read().strip()))
+except Exception:
+    prev_ts = 0
+
+now = int(time.time())
+if min_int > 0 and now - prev_ts >= min_int:
+    print("1")
+    sys.exit(0)
+
+if (
+    min_imp <= 0
+    or math.isnan(loss)
+    or math.isnan(prev_metric)
+    or (prev_metric - loss) >= min_imp
+):
+    print("1")
+else:
+    print("0")
+PY
+    )
+    if [ "$should_copy" = "1" ]; then
+      echo "[$ts] 새 최고 성능: $(basename "$best_path") (eval_loss=$loss)" | tee -a "$LOG"
+      rm -rf -- "$BEST_TMP"
+      cp -r -- "$best_path" "$BEST_TMP"
+      rm -rf -- "$BEST_DST"
+      mv -- "$BEST_TMP" "$BEST_DST"
+      echo "$best_path" >"$SRC_MARKER"
+      echo "$loss" >"$METRIC_MARKER"
+      date +%s >"$TS_MARKER"
+    fi
   fi
 
   sleep "$POLL_INTERVAL"

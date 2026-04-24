@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import os
 import random
 import shutil
@@ -15,7 +16,6 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import torch
-
 from common.app_config import (
     apply_auth_environment,
     get_discord_webhooks,
@@ -33,9 +33,387 @@ from common.training_core import (
     recommend_dataloader_num_workers,
 )
 from common.wandb_utils import wandb_is_available
+from transformers import TrainerCallback
 
 KST = timezone(timedelta(hours=9))
 logger = logging.getLogger(__name__)
+
+
+class DiscordTrainingMonitorCallback(TrainerCallback):
+    def __init__(
+        self,
+        *,
+        webhooks: list[str],
+        heartbeat_steps: int,
+        alert_cooldown_steps: int,
+        loss_threshold: float,
+        eval_loss_threshold: float,
+        grad_norm_threshold: float,
+        loss_jump_ratio: float,
+        eval_loss_jump_ratio: float,
+        auto_stop_enabled: bool,
+        auto_stop_grad_norm_threshold: float,
+        auto_stop_train_loss_threshold: float,
+        auto_stop_train_loss_consecutive: int,
+        auto_stop_eval_loss_threshold: float,
+        auto_stop_eval_loss_best_ratio: float,
+    ) -> None:
+        self.webhooks = webhooks
+        self.heartbeat_steps = max(0, int(heartbeat_steps))
+        self.alert_cooldown_steps = max(1, int(alert_cooldown_steps))
+        self.loss_threshold = float(loss_threshold)
+        self.eval_loss_threshold = float(eval_loss_threshold)
+        self.grad_norm_threshold = float(grad_norm_threshold)
+        self.loss_jump_ratio = float(loss_jump_ratio)
+        self.eval_loss_jump_ratio = float(eval_loss_jump_ratio)
+        self.auto_stop_enabled = bool(auto_stop_enabled)
+        self.auto_stop_grad_norm_threshold = float(auto_stop_grad_norm_threshold)
+        self.auto_stop_train_loss_threshold = float(auto_stop_train_loss_threshold)
+        self.auto_stop_train_loss_consecutive = max(
+            1, int(auto_stop_train_loss_consecutive)
+        )
+        self.auto_stop_eval_loss_threshold = float(auto_stop_eval_loss_threshold)
+        self.auto_stop_eval_loss_best_ratio = float(auto_stop_eval_loss_best_ratio)
+
+        self.started_at: float | None = None
+        self.total_steps: int | None = None
+        self.last_heartbeat_step = 0
+        self.last_alert_step_by_key: dict[str, int] = {}
+        self.last_train_loss: float | None = None
+        self.last_eval_loss: float | None = None
+        self.best_eval_loss: float | None = None
+        self.high_train_loss_streak = 0
+        self.stop_triggered = False
+        self.stop_reason: str | None = None
+
+    @staticmethod
+    def _safe_float(value: Any) -> float | None:
+        if value is None:
+            return None
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        if math.isnan(number) or math.isinf(number):
+            return None
+        return number
+
+    @staticmethod
+    def _looks_invalid_number(value: Any) -> bool:
+        text = str(value).strip().lower()
+        return text in {"nan", "inf", "+inf", "-inf"}
+
+    def _send_embed(self, title: str, description: str, color: int) -> None:
+        if not self.webhooks:
+            return
+        send_discord(
+            self.webhooks,
+            embed={
+                "embeds": [
+                    {
+                        "author": {"name": "AI 모델 파인튜너"},
+                        "title": title,
+                        "description": description,
+                        "color": color,
+                    }
+                ]
+            },
+        )
+
+    def _format_progress(self, step: int) -> str:
+        if self.total_steps is None or self.total_steps <= 0:
+            return f"{step}/?"
+        return f"{step}/{self.total_steps} ({step / self.total_steps * 100:.1f}%)"
+
+    def _format_eta(self, step: int) -> str:
+        if self.started_at is None or step <= 0 or self.total_steps is None:
+            return "계산 불가"
+        elapsed = time.time() - self.started_at
+        sec_per_step = elapsed / step
+        remain_steps = max(0, self.total_steps - step)
+        eta_sec = int(remain_steps * sec_per_step)
+        eta_h, eta_rem = divmod(eta_sec, 3600)
+        eta_m, eta_s = divmod(eta_rem, 60)
+        return f"{eta_h:02d}:{eta_m:02d}:{eta_s:02d}"
+
+    def _should_alert(self, key: str, step: int) -> bool:
+        last = self.last_alert_step_by_key.get(key, -(10**9))
+        if step - last < self.alert_cooldown_steps:
+            return False
+        self.last_alert_step_by_key[key] = step
+        return True
+
+    def _trigger_stop(self, control, step: int, title: str, lines: list[str]):
+        self.stop_triggered = True
+        self.stop_reason = lines[0] if lines else title
+        description = "\n".join(
+            [f"- step: {self._format_progress(step)}"] + [f"- {line}" for line in lines]
+        )
+        self._send_embed(title, description, 15158332)
+        control.should_training_stop = True
+        return control
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        self.started_at = time.time()
+        self.total_steps = int(getattr(state, "max_steps", 0) or 0)
+        return control
+
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        if self.stop_triggered:
+            control.should_training_stop = True
+            return control
+        if logs is None:
+            return control
+        step = int(getattr(state, "global_step", 0) or 0)
+        epoch = logs.get("epoch")
+        loss = self._safe_float(logs.get("loss"))
+        grad_norm = self._safe_float(logs.get("grad_norm"))
+        lr = self._safe_float(logs.get("learning_rate"))
+        raw_loss = logs.get("loss")
+        raw_grad_norm = logs.get("grad_norm")
+
+        if (
+            self.heartbeat_steps > 0
+            and step > 0
+            and step - self.last_heartbeat_step >= self.heartbeat_steps
+        ):
+            self.last_heartbeat_step = step
+            parts = [
+                f"- 진행: {self._format_progress(step)}",
+                f"- epoch: {epoch if epoch is not None else '?'}",
+                f"- train_loss: {loss:.6f}" if loss is not None else "- train_loss: ?",
+                f"- grad_norm: {grad_norm:.6f}"
+                if grad_norm is not None
+                else "- grad_norm: ?",
+                f"- learning_rate: {lr:.3e}"
+                if lr is not None
+                else "- learning_rate: ?",
+                f"- 남은 ETA: {self._format_eta(step)}",
+            ]
+            self._send_embed("📈 훈련 중간 상태", "\n".join(parts), 3447003)
+
+        if loss is not None:
+            if loss >= self.loss_threshold and self._should_alert("loss_abs", step):
+                self._send_embed(
+                    "⚠️ 이상 징후 감지 (train_loss)",
+                    "\n".join(
+                        [
+                            f"- step: {self._format_progress(step)}",
+                            f"- epoch: {epoch if epoch is not None else '?'}",
+                            f"- train_loss: {loss:.6f}",
+                            f"- 기준 임계치: {self.loss_threshold:.6f}",
+                        ]
+                    ),
+                    15277667,
+                )
+            if (
+                self.last_train_loss is not None
+                and self.last_train_loss > 0
+                and loss >= self.last_train_loss * self.loss_jump_ratio
+                and self._should_alert("loss_jump", step)
+            ):
+                self._send_embed(
+                    "⚠️ 이상 징후 감지 (train_loss 급등)",
+                    "\n".join(
+                        [
+                            f"- step: {self._format_progress(step)}",
+                            f"- 이전 loss: {self.last_train_loss:.6f}",
+                            f"- 현재 loss: {loss:.6f}",
+                            f"- 급등 배수: x{loss / self.last_train_loss:.2f}",
+                        ]
+                    ),
+                    15277667,
+                )
+            self.last_train_loss = loss
+        elif self._looks_invalid_number(raw_loss) and self._should_alert(
+            "loss_nan", step
+        ):
+            self._send_embed(
+                "⚠️ 이상 징후 감지 (train_loss NaN/Inf)",
+                f"- step: {self._format_progress(step)}\n- train_loss: {raw_loss}",
+                15277667,
+            )
+            if self.auto_stop_enabled:
+                return self._trigger_stop(
+                    control,
+                    step,
+                    "🛑 자동 중단 (NaN/Inf)",
+                    [f"train_loss={raw_loss}"],
+                )
+
+        if (
+            grad_norm is not None
+            and grad_norm >= self.grad_norm_threshold
+            and self._should_alert("grad_norm", step)
+        ):
+            self._send_embed(
+                "⚠️ 이상 징후 감지 (grad_norm)",
+                "\n".join(
+                    [
+                        f"- step: {self._format_progress(step)}",
+                        f"- epoch: {epoch if epoch is not None else '?'}",
+                        f"- grad_norm: {grad_norm:.6f}",
+                        f"- 기준 임계치: {self.grad_norm_threshold:.6f}",
+                    ]
+                ),
+                15277667,
+            )
+        elif self._looks_invalid_number(raw_grad_norm) and self._should_alert(
+            "grad_nan", step
+        ):
+            self._send_embed(
+                "⚠️ 이상 징후 감지 (grad_norm NaN/Inf)",
+                f"- step: {self._format_progress(step)}\n- grad_norm: {raw_grad_norm}",
+                15277667,
+            )
+            if self.auto_stop_enabled:
+                return self._trigger_stop(
+                    control,
+                    step,
+                    "🛑 자동 중단 (NaN/Inf)",
+                    [f"grad_norm={raw_grad_norm}"],
+                )
+
+        if self.auto_stop_enabled:
+            if (
+                loss is not None
+                and grad_norm is not None
+                and grad_norm >= self.auto_stop_grad_norm_threshold
+                and loss >= 0.5
+            ):
+                return self._trigger_stop(
+                    control,
+                    step,
+                    "🛑 자동 중단 (grad_norm 급등)",
+                    [
+                        (
+                            "grad_norm="
+                            f"{grad_norm:.6f} >= {self.auto_stop_grad_norm_threshold:.6f}"
+                        ),
+                        f"train_loss={loss:.6f} (>= 0.5)",
+                        f"epoch={epoch if epoch is not None else '?'}",
+                    ],
+                )
+
+            if loss is not None and loss >= self.auto_stop_train_loss_threshold:
+                self.high_train_loss_streak += 1
+            elif loss is not None:
+                self.high_train_loss_streak = 0
+            if self.high_train_loss_streak >= self.auto_stop_train_loss_consecutive:
+                return self._trigger_stop(
+                    control,
+                    step,
+                    "🛑 자동 중단 (train_loss 연속 급등)",
+                    [
+                        (
+                            "train_loss가 연속 "
+                            f"{self.high_train_loss_streak}회 "
+                            f"{self.auto_stop_train_loss_threshold:.6f} 이상"
+                        ),
+                        f"마지막 train_loss={loss:.6f}"
+                        if loss is not None
+                        else "마지막 train_loss=?",
+                    ],
+                )
+
+        return control
+
+    def on_evaluate(self, args, state, control, metrics=None, **kwargs):
+        if self.stop_triggered:
+            control.should_training_stop = True
+            return control
+        if metrics is None:
+            return control
+        step = int(getattr(state, "global_step", 0) or 0)
+        eval_loss = self._safe_float(metrics.get("eval_loss"))
+        raw_eval_loss = metrics.get("eval_loss")
+        if eval_loss is None:
+            if self._looks_invalid_number(raw_eval_loss) and self._should_alert(
+                "eval_nan", step
+            ):
+                self._send_embed(
+                    "⚠️ 이상 징후 감지 (eval_loss NaN/Inf)",
+                    f"- step: {self._format_progress(step)}\n- eval_loss: {raw_eval_loss}",
+                    15277667,
+                )
+                if self.auto_stop_enabled:
+                    return self._trigger_stop(
+                        control,
+                        step,
+                        "🛑 자동 중단 (NaN/Inf)",
+                        [f"eval_loss={raw_eval_loss}"],
+                    )
+            return control
+
+        if eval_loss >= self.eval_loss_threshold and self._should_alert(
+            "eval_loss_abs", step
+        ):
+            self._send_embed(
+                "⚠️ 이상 징후 감지 (eval_loss)",
+                "\n".join(
+                    [
+                        f"- step: {self._format_progress(step)}",
+                        f"- eval_loss: {eval_loss:.6f}",
+                        f"- 기준 임계치: {self.eval_loss_threshold:.6f}",
+                    ]
+                ),
+                15277667,
+            )
+
+        if (
+            self.last_eval_loss is not None
+            and self.last_eval_loss > 0
+            and eval_loss >= self.last_eval_loss * self.eval_loss_jump_ratio
+            and self._should_alert("eval_loss_jump", step)
+        ):
+            self._send_embed(
+                "⚠️ 이상 징후 감지 (eval_loss 급등)",
+                "\n".join(
+                    [
+                        f"- step: {self._format_progress(step)}",
+                        f"- 이전 eval_loss: {self.last_eval_loss:.6f}",
+                        f"- 현재 eval_loss: {eval_loss:.6f}",
+                        f"- 급등 배수: x{eval_loss / self.last_eval_loss:.2f}",
+                    ]
+                ),
+                15277667,
+            )
+
+        if self.best_eval_loss is None or eval_loss < self.best_eval_loss:
+            self.best_eval_loss = eval_loss
+
+        if self.auto_stop_enabled:
+            if eval_loss >= self.auto_stop_eval_loss_threshold:
+                return self._trigger_stop(
+                    control,
+                    step,
+                    "🛑 자동 중단 (eval_loss 임계치 초과)",
+                    [
+                        (
+                            f"eval_loss={eval_loss:.6f} >= "
+                            f"{self.auto_stop_eval_loss_threshold:.6f}"
+                        )
+                    ],
+                )
+            if (
+                self.best_eval_loss is not None
+                and self.best_eval_loss > 0
+                and eval_loss
+                >= self.best_eval_loss * self.auto_stop_eval_loss_best_ratio
+            ):
+                return self._trigger_stop(
+                    control,
+                    step,
+                    "🛑 자동 중단 (eval_loss 급격 악화)",
+                    [
+                        f"best_eval_loss={self.best_eval_loss:.6f}",
+                        f"current_eval_loss={eval_loss:.6f}",
+                        f"악화 배수=x{eval_loss / self.best_eval_loss:.2f}",
+                    ],
+                )
+
+        self.last_eval_loss = eval_loss
+        return control
 
 
 def get_free_space_gb(path: str) -> float:
@@ -184,11 +562,39 @@ def main() -> int:
         else args.save_only_model
     )
     min_free_space_gb = float(runtime.get("predefined_min_free_space_gb", 8))
+    save_total_limit = int(runtime.get("predefined_save_total_limit", 2))
     dataloader_num_workers = recommend_dataloader_num_workers(
         configured=runtime.get("dataloader_num_workers"),
         logger=logger,
     )
     dataloader_persistent_workers = dataloader_num_workers > 0
+    discord_heartbeat_steps = int(runtime.get("discord_heartbeat_steps", 100))
+    discord_alert_cooldown_steps = int(runtime.get("discord_alert_cooldown_steps", 50))
+    anomaly_loss_threshold = float(runtime.get("anomaly_loss_threshold", 5.0))
+    anomaly_eval_loss_threshold = float(runtime.get("anomaly_eval_loss_threshold", 2.0))
+    anomaly_grad_norm_threshold = float(
+        runtime.get("anomaly_grad_norm_threshold", 1000.0)
+    )
+    anomaly_loss_jump_ratio = float(runtime.get("anomaly_loss_jump_ratio", 3.0))
+    anomaly_eval_loss_jump_ratio = float(
+        runtime.get("anomaly_eval_loss_jump_ratio", 2.0)
+    )
+    auto_stop_enabled = bool(runtime.get("auto_stop_enabled", True))
+    auto_stop_grad_norm_threshold = float(
+        runtime.get("auto_stop_grad_norm_threshold", 1e7)
+    )
+    auto_stop_train_loss_threshold = float(
+        runtime.get("auto_stop_train_loss_threshold", 2.0)
+    )
+    auto_stop_train_loss_consecutive = int(
+        runtime.get("auto_stop_train_loss_consecutive", 2)
+    )
+    auto_stop_eval_loss_threshold = float(
+        runtime.get("auto_stop_eval_loss_threshold", 1.0)
+    )
+    auto_stop_eval_loss_best_ratio = float(
+        runtime.get("auto_stop_eval_loss_best_ratio", 8.0)
+    )
 
     logging.basicConfig(
         level=logging.INFO,
@@ -337,7 +743,7 @@ def main() -> int:
         "gradient_checkpointing": True,
         "save_strategy": "steps",
         "save_steps": args.save_steps,
-        "save_total_limit": 3,
+        "save_total_limit": save_total_limit,
         "eval_strategy": ("steps" if not args.no_eval else "no"),
         "eval_steps": eval_steps,
         "eval_accumulation_steps": 2,
@@ -366,6 +772,23 @@ def main() -> int:
     )
     sft_args = SFTConfig(**sft_config_kwargs)
 
+    monitor_callback = DiscordTrainingMonitorCallback(
+        webhooks=webhooks,
+        heartbeat_steps=discord_heartbeat_steps,
+        alert_cooldown_steps=discord_alert_cooldown_steps,
+        loss_threshold=anomaly_loss_threshold,
+        eval_loss_threshold=anomaly_eval_loss_threshold,
+        grad_norm_threshold=anomaly_grad_norm_threshold,
+        loss_jump_ratio=anomaly_loss_jump_ratio,
+        eval_loss_jump_ratio=anomaly_eval_loss_jump_ratio,
+        auto_stop_enabled=auto_stop_enabled,
+        auto_stop_grad_norm_threshold=auto_stop_grad_norm_threshold,
+        auto_stop_train_loss_threshold=auto_stop_train_loss_threshold,
+        auto_stop_train_loss_consecutive=auto_stop_train_loss_consecutive,
+        auto_stop_eval_loss_threshold=auto_stop_eval_loss_threshold,
+        auto_stop_eval_loss_best_ratio=auto_stop_eval_loss_best_ratio,
+    )
+
     trainer_kwargs: dict[str, Any] = {
         "model": model,
         "processing_class": tokenizer,
@@ -373,6 +796,7 @@ def main() -> int:
         "train_dataset": train_dataset,
         "eval_dataset": val_dataset if not args.no_eval else None,
         "args": sft_args,
+        "callbacks": [monitor_callback],
     }
     trainer = SFTTrainer(**trainer_kwargs)
     send_discord(
@@ -383,7 +807,7 @@ def main() -> int:
                     "author": {"name": "AI 모델 파인튜너"},
                     "color": 3066993,
                     "title": "🧱 모델/트레이너 준비 완료",
-                    "description": f"- 모델: {base_model}\n- 출력 경로: {output_dir}\n- save/eval/logging steps: {args.save_steps}/{eval_steps}/{args.logging_steps}\n- save_only_model: {save_only_model}\n- dataloader_num_workers: {dataloader_num_workers}\n- dataloader_persistent_workers: {dataloader_persistent_workers}",
+                    "description": f"- 모델: {base_model}\n- 출력 경로: {output_dir}\n- save/eval/logging steps: {args.save_steps}/{eval_steps}/{args.logging_steps}\n- save_total_limit: {save_total_limit}\n- save_only_model: {save_only_model}\n- dataloader_num_workers: {dataloader_num_workers}\n- dataloader_persistent_workers: {dataloader_persistent_workers}\n- Discord heartbeat_steps: {discord_heartbeat_steps}\n- auto_stop_enabled: {auto_stop_enabled}",
                 }
             ]
         },
@@ -451,19 +875,37 @@ def main() -> int:
             ) from exc
         raise
     elapsed_min = (time.time() - t0) / 60
-    send_discord(
-        webhooks,
-        embed={
-            "embeds": [
-                {
-                    "author": {"name": "AI 모델 파인튜너"},
-                    "title": "✅ 학습 루프 완료",
-                    "color": 3066993,
-                    "description": f"- 소요 시간: {elapsed_min:.1f}분",
-                }
-            ]
-        },
-    )
+    if monitor_callback.stop_triggered:
+        send_discord(
+            webhooks,
+            embed={
+                "embeds": [
+                    {
+                        "author": {"name": "AI 모델 파인튜너"},
+                        "title": "🛑 학습 루프 조기 종료",
+                        "color": 15158332,
+                        "description": (
+                            f"- 소요 시간: {elapsed_min:.1f}분\n"
+                            f"- 중단 사유: {monitor_callback.stop_reason or '자동 중단 조건 충족'}"
+                        ),
+                    }
+                ]
+            },
+        )
+    else:
+        send_discord(
+            webhooks,
+            embed={
+                "embeds": [
+                    {
+                        "author": {"name": "AI 모델 파인튜너"},
+                        "title": "✅ 학습 루프 완료",
+                        "color": 3066993,
+                        "description": f"- 소요 시간: {elapsed_min:.1f}분",
+                    }
+                ]
+            },
+        )
 
     lora_dir = os.path.join(output_dir, "lora")
     model.save_pretrained(lora_dir)
