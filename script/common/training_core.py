@@ -14,6 +14,10 @@ from typing import Any, Literal, overload
 
 import torch
 from PIL import Image
+from common.confusion_matrix_plot import (
+    render_confusion_matrix_image,
+    render_row_normalized_confusion_matrix_image,
+)
 
 SYSTEM_MSG = (
     "당신은 작물 해충 식별 전문가입니다. "
@@ -791,70 +795,37 @@ def evaluate_model(
 
     cm = confusion_matrix(y_true, y_pred, labels=all_labels)
     cm_path = None
+    cm_row_norm_path = None
     if save_dir:
         os.makedirs(save_dir, exist_ok=True)
         try:
-            import matplotlib
-
-            matplotlib.use("Agg")
-            import matplotlib.pyplot as plt
-            from matplotlib import font_manager
-
-            korean_keywords = ["nanum", "malgun", "gothic", "gulim", "noto", "cjk"]
-
-            def _find_korean_font() -> list[str]:
-                return [
-                    f
-                    for f in font_manager.findSystemFonts()
-                    if any(k in f.lower() for k in korean_keywords)
-                ]
-
-            korean_fonts = _find_korean_font()
-            if not korean_fonts:
-                font_manager.fontManager = font_manager.FontManager()
-                korean_fonts = _find_korean_font()
-            if korean_fonts:
-                plt.rcParams["font.family"] = font_manager.FontProperties(
-                    fname=korean_fonts[0]
-                ).get_name()
-            plt.rcParams["axes.unicode_minus"] = False
-
-            short = [lbl[:4] for lbl in all_labels]
-            n = len(all_labels)
-            fig_size = max(8, n * 0.6)
-            fig, ax = plt.subplots(figsize=(fig_size, fig_size))
-            im = ax.imshow(cm, interpolation="nearest", cmap="Blues")
-            fig.colorbar(im, ax=ax, shrink=0.8)
-            ax.set_xticks(range(n))
-            ax.set_yticks(range(n))
-            ax.set_xticklabels(short, rotation=45, ha="right", fontsize=7)
-            ax.set_yticklabels(short, fontsize=7)
-            ax.set_xlabel("예측 (Predicted)")
-            ax.set_ylabel("실제 (Actual)")
             trial_label = f"Trial {trial_num}" if trial_num is not None else ""
-            ax.set_title(
-                f"Confusion Matrix {trial_label}\nAcc={acc:.3f}  F1(macro)={f1_macro:.3f}"
-            )
-            thresh = cm.max() / 2
-            for i in range(n):
-                for j in range(n):
-                    if cm[i, j] > 0:
-                        ax.text(
-                            j,
-                            i,
-                            str(cm[i, j]),
-                            ha="center",
-                            va="center",
-                            fontsize=6,
-                            color="white" if cm[i, j] > thresh else "black",
-                        )
-            plt.tight_layout()
             cm_path = os.path.join(
                 save_dir, f"confusion_matrix_trial_{trial_num or 'final'}.png"
             )
-            fig.savefig(cm_path, dpi=150)
-            plt.close(fig)
+            cm_row_norm_path = os.path.join(
+                save_dir,
+                f"confusion_matrix_row_normalized_trial_{trial_num or 'final'}.png",
+            )
+            render_confusion_matrix_image(
+                confusion_matrix_values=cm.tolist(),
+                labels=all_labels,
+                output_path=cm_path,
+                accuracy=float(acc),
+                f1_macro=float(f1_macro),
+                trial_label=trial_label,
+            )
+            render_row_normalized_confusion_matrix_image(
+                confusion_matrix_values=cm.tolist(),
+                labels=all_labels,
+                output_path=cm_row_norm_path,
+                accuracy=float(acc),
+                f1_macro=float(f1_macro),
+                f1_weighted=float(f1_weighted),
+                sample_count=len(y_true),
+            )
             log.info("혼동 행렬 저장: %s", cm_path)
+            log.info("정규화 혼동 행렬 저장: %s", cm_row_norm_path)
         except Exception as exc:
             log.warning("혼동 행렬 플롯 실패: %s", exc)
 
@@ -869,6 +840,7 @@ def evaluate_model(
         "per_class": per_class,
         "confusion_matrix": cm.tolist(),
         "confusion_matrix_path": cm_path,
+        "confusion_matrix_row_normalized_path": cm_row_norm_path,
         "total": len(y_true),
         "correct": int(acc * len(y_true)),
         "top_misclassifications": misclassifications[:20],

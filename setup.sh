@@ -83,7 +83,7 @@ check_free_space_gb() {
 echo "=== [1/6] 기본 유틸리티 설치(apt) ==="
 if [ "${INSTALL_BASE_UTILS:-1}" = "1" ] && command -v apt-get >/dev/null 2>&1; then
   export DEBIAN_FRONTEND=noninteractive
-  APT_PACKAGES="${BASIC_APT_PACKAGES:-ca-certificates curl git nano jq unzip zip procps less}"
+  APT_PACKAGES="${BASIC_APT_PACKAGES:-ca-certificates curl git nano jq unzip zip procps less fontconfig fonts-nanum}"
   APT_PREFIX=""
   if [ "$(id -u)" -ne 0 ]; then
     if command -v sudo >/dev/null 2>&1; then
@@ -97,6 +97,9 @@ if [ "${INSTALL_BASE_UTILS:-1}" = "1" ] && command -v apt-get >/dev/null 2>&1; t
   $APT_PREFIX apt-get update -y
   # shellcheck disable=SC2086
   $APT_PREFIX apt-get install -y --no-install-recommends $APT_PACKAGES
+  if command -v fc-cache >/dev/null 2>&1; then
+    $APT_PREFIX fc-cache -f >/dev/null 2>&1 || true
+  fi
   $APT_PREFIX rm -rf /var/lib/apt/lists/*
 else
   echo "[apt] 설치 단계 스킵 (INSTALL_BASE_UTILS=${INSTALL_BASE_UTILS:-1}, apt-get 미탐지 가능)"
