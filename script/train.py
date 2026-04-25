@@ -24,6 +24,7 @@ from common.app_config import (
     load_app_config,
 )
 from common.discord_utils import send_discord
+from common.hf_upload import upload_finetune_output
 from common.training_core import (
     build_sft_config_kwargs,
     clear_gpu_memory,
@@ -964,23 +965,12 @@ def main() -> int:
     hf_token = os.environ.get("HF_TOKEN")
     if hf_repo and hf_token:
         try:
-            model.push_to_hub(hf_repo, token=hf_token, private=True)
-            tokenizer.push_to_hub(hf_repo, token=hf_token, private=True)
-            from huggingface_hub import upload_file, upload_folder
-
-            eval_dir = os.path.join(output_dir, "evaluation")
-            if os.path.isdir(eval_dir):
-                upload_folder(
-                    folder_path=eval_dir,
-                    path_in_repo="evaluation",
-                    repo_id=hf_repo,
-                    token=hf_token,
-                )
-            upload_file(
-                path_or_fileobj=readme_path,
-                path_in_repo="README.md",
+            upload_result = upload_finetune_output(
+                output_dir=output_dir,
                 repo_id=hf_repo,
                 token=hf_token,
+                private=True,
+                create_repo_if_missing=True,
             )
             send_discord(
                 webhooks,
@@ -990,7 +980,12 @@ def main() -> int:
                             "author": {"name": "AI 모델 파인튜너"},
                             "color": 3066993,
                             "title": "📤 HuggingFace 업로드 완료",
-                            "description": f"- Repo: [`{hf_repo}`](https://huggingface.co/{hf_repo})",
+                            "description": (
+                                f"- Repo: [`{upload_result['repo_id']}`]"
+                                f"({upload_result['repo_url']})\n"
+                                f"- evaluation 업로드: {upload_result['eval_uploaded']}\n"
+                                f"- README 업로드: {upload_result['readme_uploaded']}"
+                            ),
                         }
                     ]
                 },

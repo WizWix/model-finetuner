@@ -176,6 +176,20 @@ LoRA/optimizer/batch/sequence/seed 관련 값이 여기에 모여 있습니다.
 - 고정 HP 평가 결과: `config.paths.final_output_dir/evaluation`
 - 골든 백업: `config.paths.golden_dir/best_ckpt`
 
+## HF 업로드 실패 후 재업로드
+
+학습은 끝났는데 HF 업로드만 실패한 경우, 훈련을 다시 돌릴 필요 없이 산출물 폴더를 재업로드할 수 있습니다.
+
+- 기본 출력 경로: `config.paths.final_output_dir` (기본값: `/workspace/best-pest-detector`)
+- 재업로드:
+  - `uv run python script/upload_finetune_output.py --config config.json`
+- repo를 직접 지정:
+  - `uv run python script/upload_finetune_output.py --config config.json --hf-repo your-org/your-model`
+
+참고:
+- 스크립트는 기본적으로 repo가 없으면 자동 생성(`exist_ok=True`)을 시도합니다.
+- 권한이 부족하면 `403`으로 실패하며, 이 경우 HF 토큰 권한/조직 역할을 확인해야 합니다.
+
 ## 운영 문서
 
 - 학습 중단/종료 후 golden snapshot을 PEFT Adapter로 Hub에 업로드: `DOCS.md`
