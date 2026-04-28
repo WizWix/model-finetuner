@@ -435,40 +435,103 @@ def build_readme(
     elapsed_min: float,
     eval_result: dict | None,
 ) -> str:
-    metrics_section = ""
-    if eval_result:
-        metrics_section = f"""## 평가 결과
+    accuracy = eval_result.get("accuracy") if eval_result else None
+    f1_macro = eval_result.get("f1_macro") if eval_result else None
+    f1_weighted = eval_result.get("f1_weighted") if eval_result else None
+    precision_macro = eval_result.get("precision_macro") if eval_result else None
+    recall_macro = eval_result.get("recall_macro") if eval_result else None
+    val_total = eval_result.get("total", "?") if eval_result else "?"
 
-| 지표 | 값 |
-|---|---|
-| 정확도 | {eval_result["accuracy"]:.4f} |
-| F1 (macro) | {eval_result["f1_macro"]:.4f} |
-| F1 (weighted) | {eval_result["f1_weighted"]:.4f} |
-| 정밀도 (macro) | {eval_result["precision_macro"]:.4f} |
-| 재현율 (macro) | {eval_result["recall_macro"]:.4f} |
-| 검증 샘플 수 | {eval_result.get("total", "?")} |
+    def _fmt_ratio(v: Any) -> str:
+        return f"{float(v):.4f}" if v is not None else "N/A"
 
-혼동 행렬 및 클래스별 지표는 `evaluation/` 폴더를 확인하세요.
-"""
+    def _fmt_pct(v: Any) -> str:
+        return f"{float(v) * 100:.2f}%" if v is not None else "N/A"
+
     return f"""---
 base_model: {base_model}
 library_name: peft
+language:
+  - ko
+pipeline_tag: image-text-to-text
 tags:
-- lora
-- vision-language
-- pest-detection
-- unsloth
+  - agriculture
+  - image-classification
+  - korean
+  - lora
+  - peft
+  - pest-detection
+  - qwen
+  - qwen3
+  - vision-language
+datasets:
+  - Himedia-AI-01/kor-pest-detection-webp
+metrics:
+  - accuracy
+  - f1
+  - precision
+  - recall
+model-index:
+  - name: kor-pest-detector
+    results:
+      - task:
+          type: image-text-to-text
+          name: Korean Pest Classification
+        dataset:
+          name: Himedia-AI-01/kor-pest-detection-webp
+          type: image-classification
+        metrics:
+          - type: accuracy
+            value: {_fmt_ratio(accuracy)}
+            name: Accuracy
+          - type: f1
+            value: {_fmt_ratio(f1_macro)}
+            name: F1 (macro)
+          - type: f1
+            value: {_fmt_ratio(f1_weighted)}
+            name: F1 (weighted)
+          - type: precision
+            value: {_fmt_ratio(precision_macro)}
+            name: Precision (macro)
+          - type: recall
+            value: {_fmt_ratio(recall_macro)}
+            name: Recall (macro)
 ---
 
 # 해충 탐지 VLM - Qwen3.5-9B LoRA
 
-한국어 19개 해충 분류를 위해 파인튜닝된 LoRA 어댑터입니다.
+[unsloth/Qwen3.5-9B](https://huggingface.co/unsloth/Qwen3.5-9B)를 파인튜닝한 비전-언어 PEFT 기반 LoRA 어댑터입니다.<br>
+작물 사진에서 한국 농작물 해충 19종을 식별합니다.<br>
+제공된 잎, 과실, 식물 전체 사진에 감지된 해충이 있을 시 해충의 한국어 이름을 출력하고, 해충이 감지되지 않으면 `정상`을 출력합니다.
+
+* 19개 클래스 분류기: 해충 18종 + '정상' (해충 없음)
+* 베이스 모델: `{base_model}` (비전-언어, 하이브리드 Linear + Self Attention)
+* 어댑터 유형: LoRA (PEFT), Rank {hp["lora_r"]}, Alpha {hp["lora_alpha"]}
+* 언어: 한국어
+
+## ⚠ 배포 전에 반드시 읽어야 할 단 한 가지
+
+**이 LoRA는 GGUF / llama.cpp / Ollama 경로로 배포할 수 없습니다.**
+
+현재 학습 스크립트의 LoRA 타깃 모듈에는 Qwen3.5 `linear_attn` 계열
+(`in_proj_qkv`, `in_proj_z`, `in_proj_a`, `in_proj_b`, `out_proj`)이 포함될 수 있습니다.
+이 경우 merge/GGUF 변환 경로에서 LoRA 델타가 안정적으로 보존되지 않아
+출력이 붕괴될 수 있습니다.
+
+권장 배포 경로:
+- `unsloth.FastVisionModel.from_pretrained`
+- `peft.PeftModel.from_pretrained`
+- `FastVisionModel.for_inference(model)`
+- 런타임 LoRA 유지 (병합 없음, GGUF 변환 없음)
 
 ## 학습 설정
 
+<details>
+<summary>열기/접기</summary>
+
 | 하이퍼파라미터 | 값 |
 |---|---|
-| LoRA 랭크 | {hp["lora_r"]} |
+| LoRA Rank | {hp["lora_r"]} |
 | LoRA alpha | {hp["lora_alpha"]} |
 | rsLoRA 사용 | {hp["use_rslora"]} |
 | 비전 레이어 파인튜닝 | {hp["finetune_vision"]} |
@@ -487,15 +550,90 @@ tags:
 | 그래디언트 체크포인팅 | True |
 | 학습 시간 | {elapsed_min:.0f}분 |
 
-{metrics_section}
+</details>
+
+## 평가 결과
+
+| 지표 | 값 |
+|---|---|
+| 정확도 (Accuracy) | {_fmt_pct(accuracy)} |
+| 정밀도 (Precision, Macro) | {_fmt_pct(precision_macro)} |
+| 재현율 (Recall, Macro) | {_fmt_pct(recall_macro)} |
+| F1 (Macro) | {_fmt_pct(f1_macro)} |
+| F1 (Weighted) | {_fmt_pct(f1_weighted)} |
+| 검증 샘플 수 | {val_total} |
+
+혼동 행렬 및 클래스별 지표는 `evaluation/` 폴더를 확인하세요.
+
 ## 사용 예시
 
+### 빠른 시작 (권장 추론 경로: Unsloth + Runtime PEFT)
+
 ```python
+import torch
 from unsloth import FastVisionModel
-model, tokenizer = FastVisionModel.from_pretrained("{base_model}")
-model.load_adapter("<this-repo-id>")
+from peft import PeftModel
+from PIL import Image
+
+BASE = "{base_model}"
+ADAPTER = "<this-repo-id>"
+
+SYSTEM_MSG = (
+    "당신은 작물 해충 식별 전문가입니다. "
+    "사진을 보고 해충의 이름만 한국어로 답하세요. "
+    '해충이 없으면 "정상"이라고만 답하세요. '
+    "부가 설명 없이 이름만 출력하세요."
+)
+
+model, tokenizer = FastVisionModel.from_pretrained(BASE, load_in_4bit=False)
+model = PeftModel.from_pretrained(model, ADAPTER)
 FastVisionModel.for_inference(model)
+model.eval()
+
+image = Image.open("pest.jpg").convert("RGB")
+messages = [
+    {{"role": "system", "content": [{{"type": "text", "text": SYSTEM_MSG}}]}},
+    {{"role": "user", "content": [
+        {{"type": "image", "image": image}},
+        {{"type": "text", "text": "이 사진에 있는 해충의 이름을 알려주세요."}},
+    ]}},
+]
+
+text = tokenizer.apply_chat_template(
+    messages,
+    add_generation_prompt=True,
+    enable_thinking=False,
+)
+inputs = tokenizer(image, text, add_special_tokens=False, return_tensors="pt").to("cuda")
+
+with torch.inference_mode():
+    out = model.generate(
+        **inputs,
+        max_new_tokens=10,
+        use_cache=True,
+        stop_strings=["\\n"],
+        tokenizer=tokenizer.tokenizer,
+    )
+
+prediction = tokenizer.decode(
+    out[0][inputs["input_ids"].shape[1]:],
+    skip_special_tokens=True,
+).strip()
+print(prediction)
 ```
+
+### 주의: 병합/GGUF 변환 경로 비권장
+
+```python
+# 아래 경로는 현재 타깃 모듈 구성에서는 비권장
+# model = model.merge_and_unload()
+# model.save_pretrained("./merged")
+# 이후 GGUF 변환, llama.cpp/Ollama 배포
+```
+
+## 라이선스
+
+베이스 모델 및 데이터셋의 라이선스를 따릅니다.
 """
 
 
